@@ -270,8 +270,12 @@ async function placeOrder(side, signalMessage) {
             const pnl = botCurrentPosition === 'long' ? (lastClosePrice - botEntryPrice) : (botEntryPrice - lastClosePrice);
             totalNetProfit += pnl;
 
+            // Düzeltilen kısım: Kâr veya zararı açıkça belirt
+            const profitOrLossEmoji = pnl >= 0 ? '📈' : '📉';
+            const profitOrLossLabel = pnl >= 0 ? 'Kâr' : 'Zarar';
             const profitMessage = pnl >= 0 ? `+${pnl.toFixed(2)} USDT` : `${pnl.toFixed(2)} USDT`;
-            const positionCloseMessage = `📉 Pozisyon kapatıldı! ${botCurrentPosition.toUpperCase()}\n\nSon Kapanış Fiyatı: ${lastClosePrice}\nBu İşlemden Kâr/Zarar: ${profitMessage}\n**Toplam Net Kâr: ${totalNetProfit.toFixed(2)} USDT**`;
+
+            const positionCloseMessage = `${profitOrLossEmoji} Pozisyon kapatıldı! ${botCurrentPosition.toUpperCase()}\n\nSon Kapanış Fiyatı: ${lastClosePrice}\nBu İşlemden ${profitOrLossLabel}: ${profitMessage}\n**Toplam Net Kâr: ${totalNetProfit.toFixed(2)} USDT**`;
             sendTelegramMessage(positionCloseMessage);
 
             console.log(`[SİMÜLASYON] Mevcut pozisyon (${botCurrentPosition}) kapatıldı.`);
