@@ -25,28 +25,45 @@ class MACDBotStrategy {
         this.klines = [];
         this.macdLine = [];
         this.signalLine = [];
-        this.pos = 0; // 1 = long, -1 = short, 0 = no position
     }
 
     // Üstel Hareketli Ortalama (EMA) hesaplama
     calculateEMA(prices, period) {
-        if (prices.length < period) return [];
         const k = 2 / (period + 1);
-        let ema = [prices[0]];
-        for (let i = 1; i < prices.length; i++) {
-            ema.push(prices[i] * k + ema[i - 1] * (1 - k));
+        let ema = [];
+        let sum = 0;
+        let isFirst = true;
+        
+        for (let i = 0; i < prices.length; i++) {
+            if (i < period - 1) {
+                // İlk EMA için gerekli verileri topla
+                sum += prices[i];
+                ema.push(null);
+            } else if (i === period - 1) {
+                // İlk EMA'yı hesapla
+                sum += prices[i];
+                ema.push(sum / period);
+                isFirst = false;
+            } else {
+                // Sonraki EMA'ları hesapla
+                const prevEma = ema[i - 1];
+                ema.push(prices[i] * k + prevEma * (1 - k));
+            }
         }
-        return ema;
+        return ema.filter(e => e !== null);
     }
-
+    
     // MACD ve Sinyal Hattı hesaplama
     calculateMACD(data) {
-        if (data.length < this.longPeriod + this.signalPeriod) return;
+        if (data.length < this.longPeriod) return;
         const prices = data.map(d => d.close);
+        
         const shortEMA = this.calculateEMA(prices, this.shortPeriod);
         const longEMA = this.calculateEMA(prices, this.longPeriod);
+        
+        const macdLine = longEMA.map((long, i) => shortEMA[i + (this.longPeriod - this.shortPeriod)] - long);
 
-        const macdLine = shortEMA.slice(this.longPeriod - this.shortPeriod).map((ema, i) => ema - longEMA[i]);
+        if (macdLine.length < this.signalPeriod) return;
         const signalLine = this.calculateEMA(macdLine, this.signalPeriod);
 
         this.macdLine = macdLine;
@@ -62,6 +79,7 @@ class MACDBotStrategy {
         
         const payload = {
             contents: [{ parts: [{ text: prompt }] }],
+            tools: [{ "google_search": {} }],
         };
 
         try {
@@ -103,37 +121,44 @@ class MACDBotStrategy {
         const lastSignal = this.signalLine[this.signalLine.length - 1];
         const prevSignal = this.signalLine[this.signalLine.length - 2];
 
-        const prevPos = this.pos;
-        let newPos = this.pos;
+        let signalType = null;
+        let trend = null;
+        let message = null;
 
+        // Alış sinyali kontrolü (MACD sinyal çizgisini alttan kesiyor)
         if (prevMACD < prevSignal && lastMACD > lastSignal) {
-            newPos = 1; // Long signal
-        } else if (prevMACD > prevSignal && lastMACD < lastSignal) {
-            newPos = -1; // Short signal
+            signalType = 'BUY';
+            trend = await this.getTrendAnalysis();
+            message = `MACD Sinyali: AL - TrendAI tarafından onaylandı: ${trend}`;
         }
-        
-        let signal = null;
-        if (newPos !== prevPos) {
-            const trend = await this.getTrendAnalysis();
-            
+        // Satış sinyali kontrolü (MACD sinyal çizgisini üstten kesiyor)
+        else if (prevMACD > prevSignal && lastMACD < lastSignal) {
+            signalType = 'SELL';
+            trend = await this.getTrendAnalysis();
+            message = `MACD Sinyali: SAT - TrendAI tarafından onaylandı: ${trend}`;
+        }
+
+        if (signalType) {
             if (trend.toLowerCase() === 'sideways') {
-                // Eğer piyasa yataysa, yeni pozisyon açmasını engelle
-                signal = {
-                    type: 'REJECTED',
-                    message: `Sinyal Reddedildi: Piyasa yatay olduğu için yeni pozisyon açılmadı. TrendAI trendi '${trend}' olarak belirledi.`
+                return {
+                    signal: {
+                        type: 'REJECTED',
+                        signalType,
+                        message: `Sinyal Reddedildi: Piyasa yatay olduğu için yeni pozisyon açılmadı. TrendAI trendi '${trend}' olarak belirledi.`
+                    }
                 };
-                newPos = prevPos;
             } else {
-                // Eğer trend varsa, MACD sinyaline göre pozisyonu güncelle
-                this.pos = newPos;
-                signal = {
-                    type: this.pos === 1 ? 'BUY' : 'SELL',
-                    message: `MACD Sinyali: ${this.pos === 1 ? 'AL' : 'SAT'} - TrendAI tarafından onaylandı: ${trend}`
+                return {
+                    signal: {
+                        type: 'CONFIRMED',
+                        signalType,
+                        message
+                    }
                 };
             }
         }
-        
-        return { signal };
+
+        return { signal: null };
     }
 }
 
@@ -152,6 +177,7 @@ const CFG = {
 // GLOBAL STATE
 // =========================================================================================
 let botCurrentPosition = 'none';
+let botEntryPrice = 0; // Yeni global değişken
 let totalNetProfit = 0;
 let isBotInitialized = false;
 
@@ -198,10 +224,10 @@ const binanceClient = isSimulationMode ? mockBinanceClient : Binance({
 
 // MACD parametrelerini ENV'den alacak şekilde güncellendi
 const macdBotStrategy = new MACDBotStrategy({
-  shortPeriod: parseInt(process.env.MACD_SHORT_PERIOD, 10) || 12,
-  longPeriod: parseInt(process.env.MACD_LONG_PERIOD, 10) || 26,
-  signalPeriod: parseInt(process.env.MACD_SIGNAL_PERIOD, 10) || 9,
-  trendAnalysisBars: parseInt(process.env.TREND_ANALYSIS_BARS, 10) || 50
+    shortPeriod: parseInt(process.env.MACD_SHORT_PERIOD, 10) || 12,
+    longPeriod: parseInt(process.env.MACD_LONG_PERIOD, 10) || 26,
+    signalPeriod: parseInt(process.env.MACD_SIGNAL_PERIOD, 10) || 9,
+    trendAnalysisBars: parseInt(process.env.TREND_ANALYSIS_BARS, 10) || 50
 });
 
 // =========================================================================================
@@ -238,37 +264,34 @@ async function sendTelegramMessage(text) {
 async function placeOrder(side, signalMessage) {
     const lastClosePrice = macdBotStrategy.klines[macdBotStrategy.klines.length - 1]?.close || 0;
 
-    // Check if we need to close an existing position first
+    // Önceki pozisyonu kapat
     if (botCurrentPosition !== 'none' && botCurrentPosition !== side.toLowerCase()) {
         try {
-            // Placeholder for profit calculation
-            const profit = botCurrentPosition === 'long' ? (lastClosePrice - 4300) : (4300 - lastClosePrice); 
-            totalNetProfit += profit;
-            
-            const profitMessage = profit >= 0 ? `+${profit.toFixed(2)} USDT` : `${profit.toFixed(2)} USDT`;
+            const pnl = botCurrentPosition === 'long' ? (lastClosePrice - botEntryPrice) : (botEntryPrice - lastClosePrice);
+            totalNetProfit += pnl;
+
+            const profitMessage = pnl >= 0 ? `+${pnl.toFixed(2)} USDT` : `${pnl.toFixed(2)} USDT`;
             const positionCloseMessage = `📉 Pozisyon kapatıldı! ${botCurrentPosition.toUpperCase()}\n\nSon Kapanış Fiyatı: ${lastClosePrice}\nBu İşlemden Kâr/Zarar: ${profitMessage}\n**Toplam Net Kâr: ${totalNetProfit.toFixed(2)} USDT**`;
             sendTelegramMessage(positionCloseMessage);
 
-            // In a real bot, you'd place a closing order here.
             console.log(`[SİMÜLASYON] Mevcut pozisyon (${botCurrentPosition}) kapatıldı.`);
+            botCurrentPosition = 'none'; // Pozisyonu sıfırla
         } catch (error) {
             console.error('Mevcut pozisyonu kapatırken hata oluştu:', error);
             return;
         }
     }
 
+    // Yeni pozisyonu aç
     if (botCurrentPosition === 'none' || botCurrentPosition !== side.toLowerCase()) {
         try {
             const currentPrice = lastClosePrice;
-            let quantity = 0;
+            let quantity = (100 * (100 / 100)) / currentPrice; // Sabit bir sermaye kullanarak miktar hesapla
             
-            // In a real bot, you'd calculate quantity based on balance.
-            quantity = (100 * (100 / 100)) / currentPrice; // Using a fixed capital for simulation
-            
-            // In a real bot, you'd place a market order here.
             console.log(`[SİMÜLASYON] ${side} emri verildi. Fiyat: ${currentPrice}`);
             
             botCurrentPosition = side.toLowerCase();
+            botEntryPrice = currentPrice;
             const positionMessage = `🚀 **${side} Emri Gerçekleşti!**\n\n**Sinyal:** ${signalMessage}\n**Fiyat:** ${currentPrice}\n**Miktar:** ${quantity.toFixed(4)}\n**Toplam Net Kâr: ${totalNetProfit.toFixed(2)} USDT**`;
             sendTelegramMessage(positionMessage);
         } catch (error) {
@@ -290,10 +313,9 @@ async function fetchInitialData() {
             limit: 500
         });
 
-        // HATA DÜZELTİLDİ: Başlangıç mum verilerini doğru etiketlerle okuyor
         initialKlines.forEach(k => {
             macdBotStrategy.klines.push({
-                timestamp: k.closeTime,
+                timestamp: parseFloat(k.closeTime),
                 open: parseFloat(k.open),
                 high: parseFloat(k.high),
                 low: parseFloat(k.low),
@@ -319,7 +341,7 @@ ws.on('message', async (message) => {
     const data = JSON.parse(message);
     const klineData = data.k;
 
-    if (klineData.x) { // Check if candle is closed
+    if (klineData.x) { // Mum kapandıysa
         const newBar = {
             open: parseFloat(klineData.o),
             high: parseFloat(klineData.h),
@@ -333,17 +355,20 @@ ws.on('message', async (message) => {
         
         console.log(`Yeni mum verisi geldi. Fiyat: ${newBar.close}. Sinyal: ${signal?.type || 'none'}.`);
 
-        if (signal?.type === 'BUY' && botCurrentPosition !== 'long') {
-            await placeOrder('BUY', signal.message);
-        } else if (signal?.type === 'SELL' && botCurrentPosition !== 'short') {
-            await placeOrder('SELL', signal.message);
+        if (signal?.type === 'CONFIRMED') {
+            if (signal.signalType === 'BUY') {
+                await placeOrder('BUY', signal.message);
+            } else if (signal.signalType === 'SELL') {
+                await placeOrder('SELL', signal.message);
+            }
+        } else if (signal?.type === 'REJECTED') {
+            sendTelegramMessage(signal.message);
         }
     }
 });
 
 ws.on('close', () => {
     console.log('❌ WebSocket bağlantısı kapandı. Yeniden bağlanıyor...');
-    // Real-world application would include a reconnection logic here
 });
 
 ws.on('error', (error) => {
