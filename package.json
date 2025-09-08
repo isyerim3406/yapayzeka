@@ -1,5 +1,5 @@
 {
-"name": "pythonbot",
+"name": "crypto-bot",
 "version": "1.0.0",
 "description": "A crypto trading bot using Node.js and the Binance API.",
 "main": "index.js",
