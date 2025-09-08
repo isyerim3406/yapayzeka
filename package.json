@@ -8,10 +8,11 @@
 "start": "node index.js"
 },
 "dependencies": {
-"binance-api-node": "^0.12.5",
+"binance-api-node": "^0.15.3",
 "dotenv": "^16.4.5",
 "express": "^4.19.2",
 "node-fetch": "^3.3.2",
 "ws": "^8.18.0"
 }
 }
+
