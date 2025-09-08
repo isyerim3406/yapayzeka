@@ -1,11 +1,8 @@
-// index.js (güncellenmiş)
 // Gerekli bağımlılıkları içe aktarın
 import WebSocket from 'ws';
 import dotenv from 'dotenv';
 import express from 'express';
 import fetch from 'node-fetch';
-import fs from 'fs';
-import path from 'path';
 import pkg from 'binance-api-node';
 const Binance = pkg.default || pkg;
 
@@ -15,7 +12,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // =========================================================================================
-// MACD BOT STRATEJİ SINIFI (düzeltilmiş EMA/MACD hizalama ile)
+// MACD BOT STRATEJİ SINIFI
 // =========================================================================================
 class MACDBotStrategy {
     constructor(options = {}) {
@@ -31,74 +28,43 @@ class MACDBotStrategy {
     }
 
     // Üstel Hareketli Ortalama (EMA) hesaplama
-    // returns array same length as prices, with leading nulls where EMA not defined
     calculateEMA(prices, period) {
         const k = 2 / (period + 1);
-        const ema = new Array(prices.length).fill(null);
+        let ema = [];
         let sum = 0;
-
+        let isFirst = true;
+        
         for (let i = 0; i < prices.length; i++) {
-            const p = Number(prices[i]);
             if (i < period - 1) {
-                sum += p;
-                ema[i] = null;
+                // İlk EMA için gerekli verileri topla
+                sum += prices[i];
+                ema.push(null);
             } else if (i === period - 1) {
-                sum += p;
-                const first = sum / period;
-                ema[i] = first;
+                // İlk EMA'yı hesapla
+                sum += prices[i];
+                ema.push(sum / period);
+                isFirst = false;
             } else {
-                // use previous EMA (which must exist at i-1)
-                const prev = ema[i - 1];
-                ema[i] = p * k + prev * (1 - k);
+                // Sonraki EMA'ları hesapla
+                const prevEma = ema[i - 1];
+                ema.push(prices[i] * k + prevEma * (1 - k));
             }
         }
-        return ema;
+        return ema.filter(e => e !== null);
     }
-
-    // MACD ve Sinyal Hattı hesaplama (aligned)
+    
+    // MACD ve Sinyal Hattı hesaplama
     calculateMACD(data) {
-        const len = data.length;
-        if (len === 0) {
-            this.macdLine = [];
-            this.signalLine = [];
-            return;
-        }
+        if (data.length < this.longPeriod) return;
+        const prices = data.map(d => d.close);
+        
+        const shortEMA = this.calculateEMA(prices, this.shortPeriod);
+        const longEMA = this.calculateEMA(prices, this.longPeriod);
+        
+        const macdLine = longEMA.map((long, i) => shortEMA[i + (this.longPeriod - this.shortPeriod)] - long);
 
-        const prices = data.map(d => Number(d.close));
-        // produce EMA arrays aligned with prices
-        const shortEMA = this.calculateEMA(prices, this.shortPeriod); // same length
-        const longEMA = this.calculateEMA(prices, this.longPeriod);   // same length
-
-        const macdLine = new Array(len).fill(null);
-        for (let i = 0; i < len; i++) {
-            if (shortEMA[i] !== null && longEMA[i] !== null) {
-                macdLine[i] = shortEMA[i] - longEMA[i];
-            } else {
-                macdLine[i] = null;
-            }
-        }
-
-        // calculate signal line (EMA on macd values) aligned with macdLine
-        // create compact array of macd values (no nulls), calc EMA, then map back
-        const compact = [];
-        const compactIdx = [];
-        for (let i = 0; i < macdLine.length; i++) {
-            if (macdLine[i] !== null) {
-                compactIdx.push(i);
-                compact.push(macdLine[i]);
-            }
-        }
-
-        let compactSignal = [];
-        if (compact.length > 0) {
-            compactSignal = this.calculateEMA(compact, this.signalPeriod);
-        }
-
-        const signalLine = new Array(len).fill(null);
-        for (let j = 0; j < compactIdx.length; j++) {
-            const idx = compactIdx[j];
-            signalLine[idx] = compactSignal[j] !== undefined ? compactSignal[j] : null;
-        }
+        if (macdLine.length < this.signalPeriod) return;
+        const signalLine = this.calculateEMA(macdLine, this.signalPeriod);
 
         this.macdLine = macdLine;
         this.signalLine = signalLine;
@@ -138,52 +104,42 @@ class MACDBotStrategy {
         }
     }
 
-    // processCandle now updates existing bar if timestamp matches (prevents duplicates)
     async processCandle(timestamp, open, high, low, close) {
-        // timestamp expected in ms (integer)
-        const existingBarIndex = this.klines.findIndex(k => k.timestamp === timestamp);
-        if (existingBarIndex !== -1) {
-            // update existing
-            this.klines[existingBarIndex] = { timestamp, open, high, low, close };
-        } else {
-            // append new
-            this.klines.push({ timestamp, open, high, low, close });
-            if (this.klines.length > 2000) this.klines.shift(); // keep reasonable size
+        this.klines.push({ timestamp, open, high, low, close });
+        if (this.klines.length > 500) {
+            this.klines.shift();
         }
 
         this.calculateMACD(this.klines);
 
-        // find last two indices where macd and signal are both non-null
-        const idxs = [];
-        for (let i = this.macdLine.length - 1; i >= 0 && idxs.length < 2; i--) {
-            if (this.macdLine[i] !== null && this.signalLine[i] !== null) idxs.push(i);
+        if (this.macdLine.length < 2 || this.signalLine.length < 2) {
+            return { signal: null };
         }
-        if (idxs.length < 2) return { signal: null };
 
-        const lastIdx = idxs[0];
-        const prevIdx = idxs[1];
-
-        const lastMACD = this.macdLine[lastIdx];
-        const prevMACD = this.macdLine[prevIdx];
-        const lastSignal = this.signalLine[lastIdx];
-        const prevSignal = this.signalLine[prevIdx];
+        const lastMACD = this.macdLine[this.macdLine.length - 1];
+        const prevMACD = this.macdLine[this.macdLine.length - 2];
+        const lastSignal = this.signalLine[this.signalLine.length - 1];
+        const prevSignal = this.signalLine[this.signalLine.length - 2];
 
         let signalType = null;
         let trend = null;
         let message = null;
 
+        // Alış sinyali kontrolü (MACD sinyal çizgisini alttan kesiyor)
         if (prevMACD < prevSignal && lastMACD > lastSignal) {
             signalType = 'BUY';
             trend = await this.getTrendAnalysis();
             message = `MACD Sinyali: AL - TrendAI tarafından onaylandı: ${trend}`;
-        } else if (prevMACD > prevSignal && lastMACD < lastSignal) {
+        }
+        // Satış sinyali kontrolü (MACD sinyal çizgisini üstten kesiyor)
+        else if (prevMACD > prevSignal && lastMACD < lastSignal) {
             signalType = 'SELL';
             trend = await this.getTrendAnalysis();
             message = `MACD Sinyali: SAT - TrendAI tarafından onaylandı: ${trend}`;
         }
 
         if (signalType) {
-            if (trend && trend.toLowerCase && trend.toLowerCase() === 'sideways') {
+            if (trend.toLowerCase() === 'sideways') {
                 return {
                     signal: {
                         type: 'REJECTED',
@@ -210,29 +166,20 @@ class MACDBotStrategy {
 // STRATEGY CONFIGURATION
 // =========================================================================================
 const CFG = {
-    SYMBOL: process.env.SYMBOL || 'ETHUSDT', // accept 'BINANCE:ETHUSDT' or 'ETHUSDT'
-    INTERVAL: process.env.INTERVAL || '1m',  // use Binance-style interval (1m, 5m, 1h, 1d)
+    SYMBOL: process.env.SYMBOL || 'ETHUSDT',
+    INTERVAL: process.env.INTERVAL || '1m',
     TG_TOKEN: process.env.TG_TOKEN,
     TG_CHAT_ID: process.env.TG_CHAT_ID,
     IS_TESTNET: process.env.IS_TESTNET === 'true',
 };
 
-// normalize symbol
-function normalizeSymbol(s) {
-    if (!s) return 'ETHUSDT';
-    if (s.includes(':')) return s.split(':')[1];
-    return s;
-}
-const SYMBOL_BINANCE = normalizeSymbol(CFG.SYMBOL);
-
 // =========================================================================================
 // GLOBAL STATE
 // =========================================================================================
 let botCurrentPosition = 'none';
-let botEntryPrice = 0;
+let botEntryPrice = 0; // Yeni global değişken
 let totalNetProfit = 0;
 let isBotInitialized = false;
-let lastKnownCloseTime = 0; // ms epoch of last processed closed bar
 
 const isSimulationMode = !process.env.BINANCE_API_KEY || !process.env.BINANCE_SECRET_KEY;
 
@@ -284,7 +231,7 @@ const macdBotStrategy = new MACDBotStrategy({
 });
 
 // =========================================================================================
-// TELEGRAM (değişmedi)
+// TELEGRAM
 // =========================================================================================
 async function sendTelegramMessage(text) {
     if (!CFG.TG_TOKEN || !CFG.TG_CHAT_ID) {
@@ -312,12 +259,12 @@ async function sendTelegramMessage(text) {
 }
 
 // =========================================================================================
-// ORDER PLACEMENT & TRADING LOGIC (mantık aynı; küçük koruma eklendi)
+// ORDER PLACEMENT & TRADING LOGIC
 // =========================================================================================
 async function placeOrder(side, signalMessage) {
     const lastClosePrice = macdBotStrategy.klines[macdBotStrategy.klines.length - 1]?.close || 0;
 
-    // Önceki pozisyonu kapat (varsa farklı yöndeyse)
+    // Önceki pozisyonu kapat
     if (botCurrentPosition !== 'none' && botCurrentPosition !== side.toLowerCase()) {
         try {
             const pnl = botCurrentPosition === 'long' ? (lastClosePrice - botEntryPrice) : (botEntryPrice - lastClosePrice);
@@ -339,7 +286,7 @@ async function placeOrder(side, signalMessage) {
     if (botCurrentPosition === 'none' || botCurrentPosition !== side.toLowerCase()) {
         try {
             const currentPrice = lastClosePrice;
-            let quantity = (100 * (100 / 100)) / (currentPrice || 1); // Sabit bir sermaye kullanarak miktar hesapla
+            let quantity = (100 * (100 / 100)) / currentPrice; // Sabit bir sermaye kullanarak miktar hesapla
             
             console.log(`[SİMÜLASYON] ${side} emri verildi. Fiyat: ${currentPrice}`);
             
@@ -354,68 +301,56 @@ async function placeOrder(side, signalMessage) {
 }
 
 // =========================================================================================
-// DATA HANDLING (backfill + WS handling)
+// DATA HANDLING
 // =========================================================================================
+const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${CFG.SYMBOL.toLowerCase()}@kline_${CFG.INTERVAL}`);
 
-// Try to load tv_bars.json (export from TradingView) for perfect backfill alignment
-async function loadTvBackfillIfExists() {
-    const tvPath = path.join(process.cwd(), 'tv_bars.json');
-    if (fs.existsSync(tvPath)) {
-        try {
-            const raw = fs.readFileSync(tvPath, 'utf8');
-            const bars = JSON.parse(raw);
-            // bars expected to have timestamp (ms) or datetime string
-            bars.forEach(b => {
-                let ts = b.timestamp ?? b.time ?? b.closeTime ?? b.datetime ?? b.date;
-                if (typeof ts === 'string') ts = new Date(ts).getTime();
-                macdBotStrategy.klines.push({
-                    timestamp: Number(ts),
-                    open: Number(b.open),
-                    high: Number(b.high),
-                    low: Number(b.low),
-                    close: Number(b.close)
-                });
-            });
-            console.log(`✅ tv_bars.json bulundu ve ${macdBotStrategy.klines.length} bar yüklendi.`);
-            return true;
-        } catch (e) {
-            console.error('tv_bars.json okunurken hata:', e);
-            return false;
-        }
+// Helper function to get MACD status
+function getMACDStatus(macdLine, signalLine) {
+    if (macdLine.length < 1 || signalLine.length < 1) {
+        return "Durum Belirlenemedi";
     }
-    return false;
+    const lastMACD = macdLine[macdLine.length - 1];
+    const lastSignal = signalLine[signalLine.length - 1];
+    
+    if (lastMACD > lastSignal) {
+        return "Yükseliş (MACD > Sinyal)";
+    } else if (lastMACD < lastSignal) {
+        return "Düşüş (MACD < Sinyal)";
+    } else {
+        return "Yatay (MACD = Sinyal)";
+    }
 }
 
 async function fetchInitialData() {
     try {
-        const usedTv = await loadTvBackfillIfExists();
-        if (!usedTv) {
-            // Fallback: Binance REST candles
-            console.log('tv_bars.json yok. Binance REST ile backfill alınıyor...');
-            const limit = 500;
-            const klines = await binanceClient.candles({
-                symbol: SYMBOL_BINANCE,
-                interval: CFG.INTERVAL,
-                limit
-            });
-            // klines: objects with closeTime field (mock or binance-api-node format)
-            macdBotStrategy.klines = klines.map(k => ({
-                timestamp: Number(k.closeTime ?? k.close_time ?? k[6] ?? Date.now()),
-                open: Number(k.open ?? k[1]),
-                high: Number(k.high ?? k[2]),
-                low: Number(k.low ?? k[3]),
-                close: Number(k.close ?? k[4])
-            }));
-            console.log(`✅ Binance REST backfill: ${macdBotStrategy.klines.length} bar yüklendi.`);
-        }
+        const initialKlines = await binanceClient.candles({
+            symbol: CFG.SYMBOL,
+            interval: CFG.INTERVAL,
+            limit: 500
+        });
 
-        // set lastKnownCloseTime to last bar's timestamp to avoid re-processing duplicates
-        lastKnownCloseTime = macdBotStrategy.klines[macdBotStrategy.klines.length - 1]?.timestamp || 0;
+        initialKlines.forEach(k => {
+            macdBotStrategy.klines.push({
+                timestamp: parseFloat(k.closeTime),
+                open: parseFloat(k.open),
+                high: parseFloat(k.high),
+                low: parseFloat(k.low),
+                close: parseFloat(k.close)
+            });
+        });
+
+        console.log(`✅ İlk ${macdBotStrategy.klines.length} mum verisi yüklendi.`);
 
         if (!isBotInitialized) {
+            // Başlangıç MACD ve Sinyal çizgilerini hesapla
             macdBotStrategy.calculateMACD(macdBotStrategy.klines);
+
+            // MACD durumunu al
             const macdStatus = getMACDStatus(macdBotStrategy.macdLine, macdBotStrategy.signalLine);
-            const initialMessage = `✅ Bot başlatıldı!\n\n**Mod:** ${isSimulationMode ? 'Simülasyon' : 'Canlı İşlem'}\n**Sembol:** ${SYMBOL_BINANCE}\n**Zaman Aralığı:** ${CFG.INTERVAL}\n\n**MACD'nin Şu Anki Durumu:** ${macdStatus}`;
+            
+            // Telegram başlangıç mesajını güncelle
+            const initialMessage = `✅ Bot başlatıldı!\n\n**Mod:** ${isSimulationMode ? 'Simülasyon' : 'Canlı İşlem'}\n**Sembol:** ${CFG.SYMBOL}\n**Zaman Aralığı:** ${CFG.INTERVAL}\n\n**MACD'nin Şu Anki Durumu:** ${macdStatus}`;
             sendTelegramMessage(initialMessage);
             isBotInitialized = true;
         }
@@ -425,99 +360,46 @@ async function fetchInitialData() {
     }
 }
 
-// Helper function to get MACD status
-function getMACDStatus(macdLine, signalLine) {
-    if (!macdLine || !signalLine || macdLine.length < 1 || signalLine.length < 1) {
-        return "Durum Belirlenemedi";
-    }
-    // find last index where both exist
-    for (let i = macdLine.length - 1; i >= 0; i--) {
-        if (macdLine[i] !== null && signalLine[i] !== null) {
-            const lastMACD = macdLine[i];
-            const lastSignal = signalLine[i];
-            if (lastMACD > lastSignal) return "Yükseliş (MACD > Sinyal)";
-            if (lastMACD < lastSignal) return "Düşüş (MACD < Sinyal)";
-            return "Yatay (MACD = Sinyal)";
-        }
-    }
-    return "Durum Belirlenemedi";
-}
+fetchInitialData();
 
-// WebSocket setup to Binance kline stream (lowercase symbol required)
-const wsUrl = `wss://stream.binance.com:9443/ws/${SYMBOL_BINANCE.toLowerCase()}@kline_${CFG.INTERVAL}`;
-let ws = null;
+ws.on('message', async (message) => {
+    const data = JSON.parse(message);
+    const klineData = data.k;
 
-function startWebsocket() {
-    ws = new WebSocket(wsUrl);
+    if (klineData.x) { // Mum kapandıysa
+        const newBar = {
+            open: parseFloat(klineData.o),
+            high: parseFloat(klineData.h),
+            low: parseFloat(klineData.l),
+            close: parseFloat(klineData.c),
+            closeTime: klineData.T
+        };
+        
+        const result = await macdBotStrategy.processCandle(newBar.closeTime, newBar.open, newBar.high, newBar.low, newBar.close);
+        const signal = result.signal;
+        
+        console.log(`Yeni mum verisi geldi. Fiyat: ${newBar.close}. Sinyal: ${signal?.type || 'none'}.`);
 
-    ws.on('open', () => {
-        console.log('✅ WebSocket bağlantısı açıldı:', wsUrl);
-    });
-
-    ws.on('message', async (message) => {
-        try {
-            const data = JSON.parse(message);
-            const k = data.k;
-            // k: { t: startTime, T: closeTime, o, h, l, c, x: isFinal, ... }
-            if (!k) return;
-
-            const isFinal = k.x === true || k.isFinal === true;
-            const closeTime = Number(k.T ?? k.closeTime ?? k.close_time);
-            const open = Number(k.o);
-            const high = Number(k.h);
-            const low = Number(k.l);
-            const close = Number(k.c);
-
-            // Only process closed bars and only if newer than lastKnownCloseTime
-            if (isFinal && closeTime > lastKnownCloseTime) {
-                // process
-                const result = await macdBotStrategy.processCandle(closeTime, open, high, low, close);
-                lastKnownCloseTime = closeTime; // update after processing
-                const signal = result.signal;
-
-                console.log(`Yeni kapanış barı: ${new Date(closeTime).toISOString()} close=${close} signal=${signal?.type || 'none'}`);
-
-                if (signal?.type === 'CONFIRMED') {
-                    if (signal.signalType === 'BUY') {
-                        await placeOrder('BUY', signal.message);
-                    } else if (signal.signalType === 'SELL') {
-                        await placeOrder('SELL', signal.message);
-                    }
-                } else if (signal?.type === 'REJECTED') {
-                    sendTelegramMessage(signal.message);
-                }
+        if (signal?.type === 'CONFIRMED') {
+            if (signal.signalType === 'BUY') {
+                await placeOrder('BUY', signal.message);
+            } else if (signal.signalType === 'SELL') {
+                await placeOrder('SELL', signal.message);
             }
-        } catch (err) {
-            console.error('WebSocket message işlenirken hata:', err);
+        } else if (signal?.type === 'REJECTED') {
+            sendTelegramMessage(signal.message);
         }
-    });
-
-    ws.on('close', (code, reason) => {
-        console.warn(`❌ WebSocket kapandı (${code}) ${reason}. 5s sonra yeniden bağlanıyor...`);
-        setTimeout(() => startWebsocket(), 5000);
-    });
-
-    ws.on('error', (err) => {
-        console.error('WebSocket hatası:', err.message || err);
-    });
-}
-
-// =========================================================================================
-// STARTUP
-// =========================================================================================
-(async () => {
-    await fetchInitialData();
-    // start websocket only if not simulation; in sim mode user might prefer polling mocks
-    if (!isSimulationMode) {
-        startWebsocket();
-    } else {
-        console.log('Simülasyon modunda websocket başlatılmadı.');
     }
-})();
+});
 
-// =========================================================================================
-// EXPRESS
-// =========================================================================================
+ws.on('close', () => {
+    console.log('❌ WebSocket bağlantısı kapandı. Yeniden bağlanıyor...');
+});
+
+ws.on('error', (error) => {
+    console.error('WebSocket hatası:', error.message);
+});
+
 app.get('/', (req, res) => {
     res.send('Bot çalışıyor!');
 });
