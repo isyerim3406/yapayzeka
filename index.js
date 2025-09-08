@@ -117,7 +117,7 @@ class MACDBotStrategy {
             const trend = await this.getTrendAnalysis();
             
             if (trend.toLowerCase() === 'sideways') {
-                // Eğer piyasa yataysa, AI'ın yeni pozisyon açmasını engelle
+                // Eğer piyasa yataysa, yeni pozisyon açmasını engelle
                 signal = {
                     type: 'REJECTED',
                     message: `Sinyal Reddedildi: Piyasa yatay olduğu için yeni pozisyon açılmadı. TrendAI trendi '${trend}' olarak belirledi.`
@@ -196,7 +196,10 @@ const binanceClient = isSimulationMode ? mockBinanceClient : Binance({
     test: CFG.IS_TESTNET,
 });
 
-const macdBotStrategy = new MACDBotStrategy();
+// Artık TREND_ANALYSIS_BARS env değişkenini kullanıyoruz
+const macdBotStrategy = new MACDBotStrategy({
+  trendAnalysisBars: parseInt(process.env.TREND_ANALYSIS_BARS, 10) || 50
+});
 
 // =========================================================================================
 // TELEGRAM
@@ -288,9 +291,9 @@ async function fetchInitialData() {
             macdBotStrategy.klines.push({
                 timestamp: k.closeTime,
                 open: parseFloat(k.open),
-                high: parseFloat(k.high),
-                low: parseFloat(k.low),
-                close: parseFloat(k.close)
+                high: parseFloat(k.h),
+                low: parseFloat(k.l),
+                close: parseFloat(k.c)
             });
         });
 
