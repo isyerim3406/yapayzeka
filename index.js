@@ -104,29 +104,32 @@ class MACDBotStrategy {
         const prevSignal = this.signalLine[this.signalLine.length - 2];
 
         const prevPos = this.pos;
+        let newPos = this.pos;
 
         if (prevMACD < prevSignal && lastMACD > lastSignal) {
-            this.pos = 1; // Long signal
+            newPos = 1; // Long signal
         } else if (prevMACD > prevSignal && lastMACD < lastSignal) {
-            this.pos = -1; // Short signal
+            newPos = -1; // Short signal
         }
-
+        
         let signal = null;
-        if (this.pos !== prevPos) {
+        if (newPos !== prevPos) {
             const trend = await this.getTrendAnalysis();
-            const isValidSignal = (this.pos === 1 && trend.toLowerCase() === 'bullish') ||
-                                  (this.pos === -1 && trend.toLowerCase() === 'bearish');
-            if (isValidSignal) {
+            
+            if (trend.toLowerCase() === 'sideways') {
+                // Eğer piyasa yataysa, AI'ın yeni pozisyon açmasını engelle
+                signal = {
+                    type: 'REJECTED',
+                    message: `Sinyal Reddedildi: Piyasa yatay olduğu için yeni pozisyon açılmadı. TrendAI trendi '${trend}' olarak belirledi.`
+                };
+                newPos = prevPos;
+            } else {
+                // Eğer trend varsa, MACD sinyaline göre pozisyonu güncelle
+                this.pos = newPos;
                 signal = {
                     type: this.pos === 1 ? 'BUY' : 'SELL',
                     message: `MACD Sinyali: ${this.pos === 1 ? 'AL' : 'SAT'} - TrendAI tarafından onaylandı: ${trend}`
                 };
-            } else {
-                signal = {
-                    type: 'REJECTED',
-                    message: `Sinyal Reddedildi: MACD ${this.pos === 1 ? 'AL' : 'SAT'} sinyali verdi ancak TrendAI trendi '${trend}' olarak belirledi.`
-                };
-                this.pos = prevPos; // Revert position
             }
         }
         
