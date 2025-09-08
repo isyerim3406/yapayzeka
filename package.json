@@ -1,24 +1,17 @@
 {
-  "name": "binance-macd-bot",
+  "name": "macd-trading-bot",
   "version": "1.0.0",
-  "description": "MACD trading bot using Binance API and Telegram notifications",
-  "main": "index.js",
-  "type": "module",
+  "description": "A trading bot using the MACD strategy",
+  "main": "dist/index.js",
   "scripts": {
-    "start": "node index.js"
+    "build": "tsc",
+    "start": "node dist/index.js"
   },
   "dependencies": {
-    "binance-api-node": "^0.14.0",
-    "dotenv": "^16.3.1",
-    "express": "^4.18.2",
-    "node-fetch": "^3.3.2",
-    "ws": "^8.13.0"
+    "dotenv": "^16.3.1"
+    // Diğer bağımlılıklar...
   },
-  "engines": {
-    "node": "22.x"
-  },
-  "author": "SeninAdın",
-  "license": "MIT"
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  }
 }
-
-
