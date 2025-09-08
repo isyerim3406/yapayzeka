@@ -196,8 +196,11 @@ const binanceClient = isSimulationMode ? mockBinanceClient : Binance({
     test: CFG.IS_TESTNET,
 });
 
-// Artık TREND_ANALYSIS_BARS env değişkenini kullanıyoruz
+// MACD parametrelerini ENV'den alacak şekilde güncellendi
 const macdBotStrategy = new MACDBotStrategy({
+  shortPeriod: parseInt(process.env.MACD_SHORT_PERIOD, 10) || 12,
+  longPeriod: parseInt(process.env.MACD_LONG_PERIOD, 10) || 26,
+  signalPeriod: parseInt(process.env.MACD_SIGNAL_PERIOD, 10) || 9,
   trendAnalysisBars: parseInt(process.env.TREND_ANALYSIS_BARS, 10) || 50
 });
 
@@ -287,13 +290,14 @@ async function fetchInitialData() {
             limit: 500
         });
 
+        // HATA DÜZELTİLDİ: Başlangıç mum verilerini doğru etiketlerle okuyor
         initialKlines.forEach(k => {
             macdBotStrategy.klines.push({
                 timestamp: k.closeTime,
                 open: parseFloat(k.open),
-                high: parseFloat(k.h),
-                low: parseFloat(k.l),
-                close: parseFloat(k.c)
+                high: parseFloat(k.high),
+                low: parseFloat(k.low),
+                close: parseFloat(k.close)
             });
         });
 
