@@ -305,6 +305,23 @@ async function placeOrder(side, signalMessage) {
 // =========================================================================================
 const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${CFG.SYMBOL.toLowerCase()}@kline_${CFG.INTERVAL}`);
 
+// Helper function to get MACD status
+function getMACDStatus(macdLine, signalLine) {
+    if (macdLine.length < 1 || signalLine.length < 1) {
+        return "Durum Belirlenemedi";
+    }
+    const lastMACD = macdLine[macdLine.length - 1];
+    const lastSignal = signalLine[signalLine.length - 1];
+    
+    if (lastMACD > lastSignal) {
+        return "Yükseliş (MACD > Sinyal)";
+    } else if (lastMACD < lastSignal) {
+        return "Düşüş (MACD < Sinyal)";
+    } else {
+        return "Yatay (MACD = Sinyal)";
+    }
+}
+
 async function fetchInitialData() {
     try {
         const initialKlines = await binanceClient.candles({
@@ -326,7 +343,15 @@ async function fetchInitialData() {
         console.log(`✅ İlk ${macdBotStrategy.klines.length} mum verisi yüklendi.`);
 
         if (!isBotInitialized) {
-            sendTelegramMessage(`✅ Bot başlatıldı!\n\n**Mod:** ${isSimulationMode ? 'Simülasyon' : 'Canlı İşlem'}\n**Sembol:** ${CFG.SYMBOL}\n**Zaman Aralığı:** ${CFG.INTERVAL}`);
+            // Başlangıç MACD ve Sinyal çizgilerini hesapla
+            macdBotStrategy.calculateMACD(macdBotStrategy.klines);
+
+            // MACD durumunu al
+            const macdStatus = getMACDStatus(macdBotStrategy.macdLine, macdBotStrategy.signalLine);
+            
+            // Telegram başlangıç mesajını güncelle
+            const initialMessage = `✅ Bot başlatıldı!\n\n**Mod:** ${isSimulationMode ? 'Simülasyon' : 'Canlı İşlem'}\n**Sembol:** ${CFG.SYMBOL}\n**Zaman Aralığı:** ${CFG.INTERVAL}\n\n**MACD'nin Şu Anki Durumu:** ${macdStatus}`;
+            sendTelegramMessage(initialMessage);
             isBotInitialized = true;
         }
 
