@@ -1,5 +1,4 @@
 // Gerekli bağımlılıkları içe aktarın
-import WebSocket from 'ws';
 import dotenv from 'dotenv';
 import express from 'express';
 import fetch from 'node-fetch';
@@ -21,7 +20,7 @@ class MACDBotStrategy {
         this.signalPeriod = options.signalPeriod || 9;
         this.trendAnalysisBars = options.trendAnalysisBars || 50;
 
-        // Internal state
+        // Dahili durum
         this.klines = [];
         this.macdLine = [];
         this.signalLine = [];
@@ -32,20 +31,15 @@ class MACDBotStrategy {
         const k = 2 / (period + 1);
         let ema = [];
         let sum = 0;
-        let isFirst = true;
         
         for (let i = 0; i < prices.length; i++) {
             if (i < period - 1) {
-                // İlk EMA için gerekli verileri topla
                 sum += prices[i];
                 ema.push(null);
             } else if (i === period - 1) {
-                // İlk EMA'yı hesapla
                 sum += prices[i];
                 ema.push(sum / period);
-                isFirst = false;
             } else {
-                // Sonraki EMA'ları hesapla
                 const prevEma = ema[i - 1];
                 ema.push(prices[i] * k + prevEma * (1 - k));
             }
@@ -105,11 +99,18 @@ class MACDBotStrategy {
     }
 
     async processCandle(timestamp, open, high, low, close) {
-        this.klines.push({ timestamp, open, high, low, close });
-        if (this.klines.length > 500) {
-            this.klines.shift();
+        const existingBarIndex = this.klines.findIndex(k => k.closeTime === timestamp);
+        if (existingBarIndex !== -1) {
+            // Mum zaten mevcut, sadece güncelle
+            this.klines[existingBarIndex] = { timestamp, open, high, low, close };
+        } else {
+            // Yeni mum ekle
+            this.klines.push({ timestamp, open, high, low, close });
+            if (this.klines.length > 500) {
+                this.klines.shift();
+            }
         }
-
+        
         this.calculateMACD(this.klines);
 
         if (this.macdLine.length < 2 || this.signalLine.length < 2) {
@@ -125,13 +126,13 @@ class MACDBotStrategy {
         let trend = null;
         let message = null;
 
-        // Alış sinyali kontrolü (MACD sinyal çizgisini alttan kesiyor)
+        // Alış sinyali kontrolü
         if (prevMACD < prevSignal && lastMACD > lastSignal) {
             signalType = 'BUY';
             trend = await this.getTrendAnalysis();
             message = `MACD Sinyali: AL - TrendAI tarafından onaylandı: ${trend}`;
         }
-        // Satış sinyali kontrolü (MACD sinyal çizgisini üstten kesiyor)
+        // Satış sinyali kontrolü
         else if (prevMACD > prevSignal && lastMACD < lastSignal) {
             signalType = 'SELL';
             trend = await this.getTrendAnalysis();
@@ -163,11 +164,38 @@ class MACDBotStrategy {
 }
 
 // =========================================================================================
+// TRADINGVIEW API ENTEGRASYONU
+// =========================================================================================
+
+// TradingView'in genel API'sini kullanarak veri çekeceğiz
+const TRADINGVIEW_API_URL = 'https://api.tradingview.com/data/v1/history';
+
+async function fetchTradingViewData(symbol, interval, limit) {
+    try {
+        const response = await fetch(`${TRADINGVIEW_API_URL}?symbol=${symbol}&interval=${interval}&limit=${limit}`);
+        if (!response.ok) {
+            throw new Error(`TradingView API error: ${response.status} ${response.statusText}`);
+        }
+        const data = await response.json();
+        return data.bars.map(bar => ({
+            timestamp: bar.time,
+            open: bar.open,
+            high: bar.high,
+            low: bar.low,
+            close: bar.close
+        }));
+    } catch (error) {
+        console.error('TradingView verilerini çekerken hata:', error);
+        return [];
+    }
+}
+
+// =========================================================================================
 // STRATEGY CONFIGURATION
 // =========================================================================================
 const CFG = {
-    SYMBOL: process.env.SYMBOL || 'ETHUSDT',
-    INTERVAL: process.env.INTERVAL || '1m',
+    SYMBOL: process.env.SYMBOL || 'BINANCE:ETHUSDT',
+    INTERVAL: process.env.INTERVAL || '1', // TradingView için '1', '5', '15', '60' vb.
     TG_TOKEN: process.env.TG_TOKEN,
     TG_CHAT_ID: process.env.TG_CHAT_ID,
     IS_TESTNET: process.env.IS_TESTNET === 'true',
@@ -177,9 +205,10 @@ const CFG = {
 // GLOBAL STATE
 // =========================================================================================
 let botCurrentPosition = 'none';
-let botEntryPrice = 0; // Yeni global değişken
+let botEntryPrice = 0;
 let totalNetProfit = 0;
 let isBotInitialized = false;
+let lastKnownCloseTime = 0;
 
 const isSimulationMode = !process.env.BINANCE_API_KEY || !process.env.BINANCE_SECRET_KEY;
 
@@ -189,25 +218,6 @@ const mockBinanceClient = {
     futuresMarketOrder: async ({ side, quantity }) => {
         console.log(`[SİMÜLASYON] ${side} emri başarıyla oluşturuldu: ${quantity}`);
         return { status: 'FILLED' };
-    },
-    candles: async ({ symbol, interval, limit }) => {
-        const mockCandles = [];
-        let price = 4300;
-        let now = Date.now();
-        for (let i = 0; i < limit; i++) {
-            const open = price;
-            const close = open + (Math.random() - 0.5) * 10;
-            mockCandles.push({
-                open: open.toFixed(2),
-                high: Math.max(open, close).toFixed(2),
-                low: Math.min(open, close).toFixed(2),
-                close: close.toFixed(2),
-                closeTime: now - (limit - i) * 60 * 1000,
-                volume: (1000 + Math.random() * 500).toFixed(2),
-            });
-            price = close;
-        }
-        return mockCandles;
     },
     prices: async ({ symbol }) => {
         const lastKline = macdBotStrategy.klines[macdBotStrategy.klines.length - 1];
@@ -275,7 +285,7 @@ async function placeOrder(side, signalMessage) {
             sendTelegramMessage(positionCloseMessage);
 
             console.log(`[SİMÜLASYON] Mevcut pozisyon (${botCurrentPosition}) kapatıldı.`);
-            botCurrentPosition = 'none'; // Pozisyonu sıfırla
+            botCurrentPosition = 'none';
         } catch (error) {
             console.error('Mevcut pozisyonu kapatırken hata oluştu:', error);
             return;
@@ -283,10 +293,10 @@ async function placeOrder(side, signalMessage) {
     }
 
     // Yeni pozisyonu aç
-    if (botCurrentPosition === 'none' || botCurrentPosition !== side.toLowerCase()) {
+    if (botCurrentPosition === 'none') {
         try {
             const currentPrice = lastClosePrice;
-            let quantity = (100 * (100 / 100)) / currentPrice; // Sabit bir sermaye kullanarak miktar hesapla
+            let quantity = (100 * (100 / 100)) / currentPrice;
             
             console.log(`[SİMÜLASYON] ${side} emri verildi. Fiyat: ${currentPrice}`);
             
@@ -303,9 +313,8 @@ async function placeOrder(side, signalMessage) {
 // =========================================================================================
 // DATA HANDLING
 // =========================================================================================
-const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${CFG.SYMBOL.toLowerCase()}@kline_${CFG.INTERVAL}`);
 
-// Helper function to get MACD status
+// MACD durumunu almak için yardımcı fonksiyon
 function getMACDStatus(macdLine, signalLine) {
     if (macdLine.length < 1 || signalLine.length < 1) {
         return "Durum Belirlenemedi";
@@ -324,33 +333,27 @@ function getMACDStatus(macdLine, signalLine) {
 
 async function fetchInitialData() {
     try {
-        const initialKlines = await binanceClient.candles({
-            symbol: CFG.SYMBOL,
-            interval: CFG.INTERVAL,
-            limit: 500
-        });
+        const initialBars = await fetchTradingViewData(CFG.SYMBOL, CFG.INTERVAL, 500);
 
-        initialKlines.forEach(k => {
+        initialBars.forEach(k => {
             macdBotStrategy.klines.push({
-                timestamp: parseFloat(k.closeTime),
-                open: parseFloat(k.open),
-                high: parseFloat(k.high),
-                low: parseFloat(k.low),
-                close: parseFloat(k.close)
+                timestamp: k.timestamp,
+                open: k.open,
+                high: k.high,
+                low: k.low,
+                close: k.close
             });
         });
+        
+        lastKnownCloseTime = macdBotStrategy.klines[macdBotStrategy.klines.length - 1]?.timestamp || 0;
 
         console.log(`✅ İlk ${macdBotStrategy.klines.length} mum verisi yüklendi.`);
 
         if (!isBotInitialized) {
-            // Başlangıç MACD ve Sinyal çizgilerini hesapla
             macdBotStrategy.calculateMACD(macdBotStrategy.klines);
-
-            // MACD durumunu al
             const macdStatus = getMACDStatus(macdBotStrategy.macdLine, macdBotStrategy.signalLine);
             
-            // Telegram başlangıç mesajını güncelle
-            const initialMessage = `✅ Bot başlatıldı!\n\n**Mod:** ${isSimulationMode ? 'Simülasyon' : 'Canlı İşlem'}\n**Sembol:** ${CFG.SYMBOL}\n**Zaman Aralığı:** ${CFG.INTERVAL}\n\n**MACD'nin Şu Anki Durumu:** ${macdStatus}`;
+            const initialMessage = `✅ Bot başlatıldı!\n\n**Mod:** ${isSimulationMode ? 'Simülasyon' : 'Canlı İşlem'}\n**Veri Kaynağı:** TradingView\n**Sembol:** ${CFG.SYMBOL}\n**Zaman Aralığı:** ${CFG.INTERVAL} dk\n\n**MACD'nin Şu Anki Durumu:** ${macdStatus}`;
             sendTelegramMessage(initialMessage);
             isBotInitialized = true;
         }
@@ -360,45 +363,40 @@ async function fetchInitialData() {
     }
 }
 
-fetchInitialData();
+// Yeni verileri düzenli aralıklarla kontrol etme
+const pollingInterval = parseInt(CFG.INTERVAL, 10) * 60 * 1000; // Saniye cinsinden
+setInterval(async () => {
+    try {
+        const latestBars = await fetchTradingViewData(CFG.SYMBOL, CFG.INTERVAL, 5);
+        if (latestBars.length > 0) {
+            const newBars = latestBars.filter(bar => bar.timestamp > lastKnownCloseTime);
+            
+            for (const newBar of newBars) {
+                const result = await macdBotStrategy.processCandle(newBar.timestamp, newBar.open, newBar.high, newBar.low, newBar.close);
+                const signal = result.signal;
+                
+                console.log(`Yeni mum verisi geldi. Fiyat: ${newBar.close}. Sinyal: ${signal?.type || 'none'}.`);
 
-ws.on('message', async (message) => {
-    const data = JSON.parse(message);
-    const klineData = data.k;
-
-    if (klineData.x) { // Mum kapandıysa
-        const newBar = {
-            open: parseFloat(klineData.o),
-            high: parseFloat(klineData.h),
-            low: parseFloat(klineData.l),
-            close: parseFloat(klineData.c),
-            closeTime: klineData.T
-        };
-        
-        const result = await macdBotStrategy.processCandle(newBar.closeTime, newBar.open, newBar.high, newBar.low, newBar.close);
-        const signal = result.signal;
-        
-        console.log(`Yeni mum verisi geldi. Fiyat: ${newBar.close}. Sinyal: ${signal?.type || 'none'}.`);
-
-        if (signal?.type === 'CONFIRMED') {
-            if (signal.signalType === 'BUY') {
-                await placeOrder('BUY', signal.message);
-            } else if (signal.signalType === 'SELL') {
-                await placeOrder('SELL', signal.message);
+                if (signal?.type === 'CONFIRMED') {
+                    if (signal.signalType === 'BUY') {
+                        await placeOrder('BUY', signal.message);
+                    } else if (signal.signalType === 'SELL') {
+                        await placeOrder('SELL', signal.message);
+                    }
+                } else if (signal?.type === 'REJECTED') {
+                    sendTelegramMessage(signal.message);
+                }
             }
-        } else if (signal?.type === 'REJECTED') {
-            sendTelegramMessage(signal.message);
+            if (newBars.length > 0) {
+                lastKnownCloseTime = newBars[newBars.length - 1].timestamp;
+            }
         }
+    } catch (error) {
+        console.error('Veri çekerken hata:', error);
     }
-});
+}, pollingInterval);
 
-ws.on('close', () => {
-    console.log('❌ WebSocket bağlantısı kapandı. Yeniden bağlanıyor...');
-});
-
-ws.on('error', (error) => {
-    console.error('WebSocket hatası:', error.message);
-});
+fetchInitialData();
 
 app.get('/', (req, res) => {
     res.send('Bot çalışıyor!');
