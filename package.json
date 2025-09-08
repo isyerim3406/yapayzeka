@@ -1,17 +1,18 @@
 {
-  "name": "macd-trading-bot",
+  "name": "yapayzeka",
   "version": "1.0.0",
-  "description": "A trading bot using the MACD strategy",
-  "main": "dist/index.js",
+  "description": "Binance Bot AI",
+  "main": "index.js",
+  "type": "module",
   "scripts": {
-    "build": "tsc",
-    "start": "node dist/index.js"
+    "start": "node index.js"
   },
   "dependencies": {
-    "dotenv": "^16.3.1"
-    // Diğer bağımlılıklar...
-  },
-  "devDependencies": {
-    "typescript": "^5.3.3"
+    "binance-api-node": "^0.12.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "node-fetch": "^3.3.2",
+    "tvdatafeed": "^1.0.12",
+    "ws": "^8.14.2"
   }
 }
