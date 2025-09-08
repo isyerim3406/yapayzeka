@@ -1,0 +1,17 @@
+{
+"name": "pythonbot",
+"version": "1.0.0",
+"description": "A crypto trading bot using Node.js and the Binance API.",
+"main": "index.js",
+"type": "module",
+"scripts": {
+"start": "node index.js"
+},
+"dependencies": {
+"binance-api-node": "^0.12.5",
+"dotenv": "^16.4.5",
+"express": "^4.19.2",
+"node-fetch": "^3.3.2",
+"ws": "^8.18.0"
+}
+}

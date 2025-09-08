@@ -1,0 +1,10 @@
+Botunuzun Render'da nasıl dağıtılacağını tanımlar
+https://www.google.com/search?q=https://render.com/docs/yaml
+services:
+
+type: web
+name: js-bot
+env: node
+buildCommand: "npm install"
+startCommand: "node index.js"
+plan: free # Botunuz için en uygun planı seçebilirsiniz.
