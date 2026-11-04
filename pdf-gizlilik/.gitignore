@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+build/
+dist/
+*.spec
+*_ANONIM.pdf
+*.bak
+*.orig
+*.backup
