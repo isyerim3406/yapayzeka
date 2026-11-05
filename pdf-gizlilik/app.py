@@ -12,6 +12,8 @@ import fitz
 from PIL import Image, ImageTk
 
 from engine import CATEGORY_ORDER, export_pdf, ocr_available, scan_pdf
+from filters import FilterStore
+from filter_dialog import FilterDialog
 
 
 class Application(tk.Tk):
@@ -37,6 +39,9 @@ class Application(tk.Tk):
         self.offset_y = 0
         self.drag_start = None
         self.events = queue.Queue()
+        self.filter_store = FilterStore()
+        self.busy = False
+        self.filters_stale = False
         self._build()
         self.after(100, self._process_events)
 
@@ -49,7 +54,10 @@ class Application(tk.Tk):
         top = ttk.Frame(self, padding=10)
         top.pack(fill='x')
         ttk.Label(top, text='PDF GİZLİLİK', font=('Segoe UI', 17, 'bold')).pack(side='left', padx=(0, 20))
-        ttk.Button(top, text='PDF Aç', command=self.open_file).pack(side='left', padx=3)
+        self.open_button = ttk.Button(top, text='PDF Aç', command=self.open_file)
+        self.open_button.pack(side='left', padx=3)
+        self.filter_button = ttk.Button(top, text='Filtre Yönetimi', command=self.manage_filters)
+        self.filter_button.pack(side='left', padx=3)
         self.scan_button = ttk.Button(top, text='Tüm Sayfaları Tara', command=self.start_scan)
         self.scan_button.pack(side='left', padx=3)
         self.export_button = ttk.Button(top, text='Temiz PDF Oluştur', command=self.start_export, state='disabled')
@@ -132,7 +140,23 @@ class Application(tk.Tk):
                              'Çıktıyı Gemini’ye göndermeden önce mutlaka gözden geçirin.',
                   wraplength=295, justify='left').pack(anchor='w', pady=7)
 
+    def set_busy(self, busy):
+        self.busy = busy
+        for button in (self.open_button, self.filter_button, self.scan_button):
+            button.config(state='disabled' if busy else 'normal')
+
+    def manage_filters(self):
+        if not self.busy:
+            FilterDialog(self, self.filter_store, self.filters_saved)
+
+    def filters_saved(self):
+        self.filters_stale = True
+        self.export_button.config(state='disabled')
+        self.status.set('Filtreler kaydedildi. Açık PDF için Tüm Sayfaları Tara düğmesine basın.')
+
     def open_file(self):
+        if self.busy:
+            return
         filename = filedialog.askopenfilename(title='PDF seçin', filetypes=[('PDF dosyaları', '*.pdf')])
         if not filename:
             return
@@ -232,10 +256,18 @@ class Application(tk.Tk):
         self.show_page()
 
     def start_scan(self):
+        if self.busy:
+            return
+        if self.filter_store.error:
+            messagebox.showerror("Filtre dosyası okunamadı", "Kayıtlı filtreler okunamadı: " + self.filter_store.error + "\nFiltre Yönetimi ekranından kontrol edip kaydedin.")
+            return
         if not self.path:
             messagebox.showinfo('PDF seçilmedi', 'Önce PDF açın.')
             return
         terms = tuple(t.strip() for t in self.terms.get().split(',') if t.strip())
+        filter_data = self.filter_store.snapshot()
+        self.filters_stale = True
+        self.set_busy(True)
         self.scan_button.config(state='disabled')
         self.export_button.config(state='disabled')
         self.progress['value'] = 0
@@ -243,7 +275,7 @@ class Application(tk.Tk):
         def run():
             try:
                 found, warnings = scan_pdf(path, terms, lambda n, total, msg:
-                    self.events.put(('progress', n, total, msg)), use_ocr=True)
+                    self.events.put(('progress', n, total, msg)), use_ocr=True, filter_data=filter_data)
                 self.events.put(('scan_done', found, warnings))
             except Exception as exc:
                 self.events.put(('error', type(exc).__name__ + ': ' + str(exc)))
@@ -259,6 +291,8 @@ class Application(tk.Tk):
                     self.progress['value'] = n
                     self.status.set(f'{msg}: {n} / {total}')
                 elif kind == 'scan_done':
+                    self.set_busy(False)
+                    self.filters_stale = False
                     self.findings, self.warnings = data
                     self._update_lists()
                     self.scan_button.config(state='normal')
@@ -266,14 +300,16 @@ class Application(tk.Tk):
                     self.status.set(f'Tarama tamamlandı: {len(self.findings)} bulgu, {len(self.omit_pages)} riskli sayfa.')
                     self.show_page()
                 elif kind == 'export_done':
+                    self.set_busy(False)
                     self.scan_button.config(state='normal')
                     self.export_button.config(state='normal')
                     self.status.set('Temiz PDF oluşturuldu: ' + data[0])
                     messagebox.showinfo('İşlem tamamlandı',
                                         'PDF kaydedildi. Gemini’ye yüklemeden önce dosyayı görsel olarak inceleyin.\n\n' + data[0])
                 elif kind == 'error':
+                    self.set_busy(False)
                     self.scan_button.config(state='normal')
-                    if self.findings:
+                    if self.findings and not self.filters_stale:
                         self.export_button.config(state='normal')
                     self.status.set('HATA: ' + data[0])
                     messagebox.showerror('İşlem başarısız', data[0])
@@ -287,7 +323,7 @@ class Application(tk.Tk):
         for f in self.findings:
             key = (f.category, f.value.casefold().strip())
             self.groups.setdefault(key, []).append(f)
-        for cat in CATEGORY_ORDER:
+        for cat in (*CATEGORY_ORDER, *sorted({f.category for f in self.findings} - set(CATEGORY_ORDER))):
             cat_keys = [k for k in self.groups if k[0] == cat]
             if not cat_keys:
                 continue
@@ -365,6 +401,8 @@ class Application(tk.Tk):
         self.show_page()
 
     def start_export(self):
+        if self.busy or self.filters_stale:
+            return
         if not self.path or not self.findings:
             messagebox.showwarning('Bulgular yok', 'Önce tarama yapın ve en az bir bulguyu işaretleyin.')
             return
@@ -390,6 +428,7 @@ class Application(tk.Tk):
             return
         self.export_button.config(state='disabled')
         self.scan_button.config(state='disabled')
+        self.set_busy(True)
         source, findings, manual, omitted = self.path, list(self.findings), dict(self.manual), set(self.omit_pages)
         def run():
             try:

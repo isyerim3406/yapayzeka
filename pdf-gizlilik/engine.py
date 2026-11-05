@@ -94,15 +94,16 @@ def _rect_for(mapping, a, b):
             max(r[2] for r in xs), max(r[3] for r in xs))
 
 
-def find_in_line(text, mapping, page_number, source, custom_terms=()):
+def find_in_line(text, mapping, page_number, source, custom_terms=(), use_legacy=True):
     found = []
     used = set()
-    patterns = list(PATTERNS)
+    patterns = list(PATTERNS) if use_legacy else []
     for term in custom_terms:
         term = term.strip()
         if len(term) >= 2:
             patterns.insert(0, ('Özel terim', re.compile(re.escape(term), re.I)))
-    patterns.append(('TCKN', re.compile(r'(?<!\d)\d{11}(?!\d)')))
+    if use_legacy:
+        patterns.append(('TCKN', re.compile(r'(?<!\d)\d{11}(?!\d)')))
     for cat, pattern in patterns:
         for m in pattern.finditer(text):
             value = m.group().strip()
@@ -182,8 +183,10 @@ def _ocr_lines(page, zoom=2.0, tile_pts=650, min_confidence=35):
                 yield from extract_lines_from_words(groups[key])
 
 
-def scan_pdf(path: str | Path, custom_terms=(), progress=None, use_ocr=True):
+def scan_pdf(path: str | Path, custom_terms=(), progress=None, use_ocr=True, filter_data=None):
     """Returns findings and blocking warnings; never writes the original anywhere."""
+    from filters import FilterMatcher, FilterStore
+    matcher = FilterMatcher(filter_data if filter_data is not None else FilterStore().snapshot())
     pdf = fitz.open(str(path))
     findings, warnings = [], []
     try:
@@ -195,8 +198,10 @@ def scan_pdf(path: str | Path, custom_terms=(), progress=None, use_ocr=True):
             if progress:
                 progress(n + 1, len(pdf), 'Metin ve pafta taraması')
             words = page.get_text('words', sort=True)
-            for text, mapping in extract_lines_from_words(words):
-                findings.extend(find_in_line(text, mapping, n, 'PDF metni', custom_terms))
+            text_lines = list(extract_lines_from_words(words))
+            findings.extend(matcher.find(text_lines, n, 'PDF metni'))
+            for text, mapping in text_lines:
+                findings.extend(find_in_line(text, mapping, n, 'PDF metni', custom_terms, use_legacy=False))
             imgs = page.get_image_info(xrefs=False)
             page_area = max(1.0, page.rect.get_area())
             image_area = sum(fitz.Rect(im['bbox']).get_area() for im in imgs if 'bbox' in im)
@@ -207,8 +212,10 @@ def scan_pdf(path: str | Path, custom_terms=(), progress=None, use_ocr=True):
                     warnings.append(PageWarning(n, 'Görüntü/pafta OCR taraması yapılmadı.'))
                 else:
                     try:
-                        for text, mapping in _ocr_lines(page, zoom=1.8 if large_page else 2.2):
-                            findings.extend(find_in_line(text, mapping, n, 'OCR', custom_terms))
+                        ocr_lines = list(_ocr_lines(page, zoom=1.8 if large_page else 2.2))
+                        findings.extend(matcher.find(ocr_lines, n, 'OCR'))
+                        for text, mapping in ocr_lines:
+                            findings.extend(find_in_line(text, mapping, n, 'OCR', custom_terms, use_legacy=False))
                     except Exception as exc:
                         warnings.append(PageWarning(n, f'OCR başarısız: {type(exc).__name__}'))
             # A site or map can identify the location even after numbers are removed.
