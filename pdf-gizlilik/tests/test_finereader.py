@@ -55,8 +55,8 @@ class FineReaderTests(unittest.TestCase):
     def runner(self, text='Vergi No: 1234567890', **pdf_options):
         def fake(args, **kwargs):
             self.assertFalse(kwargs['shell'])
-            self.assertEqual(kwargs['cwd'], str(self.folder))
-            self.assertEqual(args[:6], [str(self.exe), str(self.source), '/lang', 'Turkish', 'English', '/out'])
+            self.assertEqual(Path(kwargs['cwd']).resolve(), self.folder.resolve())
+            self.assertEqual(args[:6], [str(self.exe.resolve()), str(self.source.resolve()), '/lang', 'Turkish', 'English', '/out'])
             make_pdf(args[-1], text, **pdf_options)
             return Process()
         return fake
