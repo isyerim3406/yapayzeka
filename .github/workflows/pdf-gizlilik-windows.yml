@@ -39,7 +39,8 @@ jobs:
             --collect-all fitz --collect-all pymupdf `
             pdf-gizlilik/app.py
           Copy-Item 'ocr-bundle' 'dist/PDF-Gizlilik/tesseract' -Recurse -Force
-          'Yerel ve cevrimdisi OCR dahildir.' | Set-Content 'dist/PDF-Gizlilik/README.txt'
+          Copy-Item 'pdf-gizlilik/FINEREADER.md' 'dist/PDF-Gizlilik/FINEREADER_KULLANIM.txt'
+          'PDF Gizlilik v3: 128 filtre, Tesseract ve yerel FineReader OCR baglantisi. FineReader Konumu ile tam FineReaderOCR.exe dosyasini secin.' | Set-Content 'dist/PDF-Gizlilik/README.txt'
           Compress-Archive -Path 'dist/PDF-Gizlilik/*' -DestinationPath 'PDF-Gizlilik-Windows-Portable.zip'
       - name: Derleme dosyasini yayinla
         uses: actions/upload-artifact@v4

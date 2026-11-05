@@ -183,7 +183,8 @@ def _ocr_lines(page, zoom=2.0, tile_pts=650, min_confidence=35):
                 yield from extract_lines_from_words(groups[key])
 
 
-def scan_pdf(path: str | Path, custom_terms=(), progress=None, use_ocr=True, filter_data=None):
+def scan_pdf(path: str | Path, custom_terms=(), progress=None, use_ocr=True, filter_data=None,
+             external_ocr=False):
     """Returns findings and blocking warnings; never writes the original anywhere."""
     from filters import FilterMatcher, FilterStore
     matcher = FilterMatcher(filter_data if filter_data is not None else FilterStore().snapshot())
@@ -199,16 +200,22 @@ def scan_pdf(path: str | Path, custom_terms=(), progress=None, use_ocr=True, fil
                 progress(n + 1, len(pdf), 'Metin ve pafta taraması')
             words = page.get_text('words', sort=True)
             text_lines = list(extract_lines_from_words(words))
-            findings.extend(matcher.find(text_lines, n, 'PDF metni'))
+            text_source = 'FineReader OCR' if external_ocr else 'PDF metni'
+            findings.extend(matcher.find(text_lines, n, text_source))
             for text, mapping in text_lines:
-                findings.extend(find_in_line(text, mapping, n, 'PDF metni', custom_terms, use_legacy=False))
+                findings.extend(find_in_line(text, mapping, n, text_source, custom_terms, use_legacy=False))
             imgs = page.get_image_info(xrefs=False)
             page_area = max(1.0, page.rect.get_area())
             image_area = sum(fitz.Rect(im['bbox']).get_area() for im in imgs if 'bbox' in im)
             large_page = max(page.rect.width, page.rect.height) > 1600
             needs_ocr = (len(words) < 25 and (bool(imgs) or large_page)) or image_area > page_area * .18 or large_page
             if needs_ocr:
-                if not use_ocr or not ocr_available():
+                if external_ocr:
+                    if not words:
+                        warnings.append(PageWarning(n, 'FineReader OCR: bu sayfada metin katmanı alınamadı.'))
+                    elif len(words) < 10:
+                        warnings.append(PageWarning(n, 'FineReader metin katmanı sınırlı; görsel inceleme gerekir.'))
+                elif not use_ocr or not ocr_available():
                     warnings.append(PageWarning(n, 'Görüntü/pafta OCR taraması yapılmadı.'))
                 else:
                     try:

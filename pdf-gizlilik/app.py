@@ -14,6 +14,8 @@ from PIL import Image, ImageTk
 from engine import CATEGORY_ORDER, export_pdf, ocr_available, scan_pdf
 from filters import FilterStore
 from filter_dialog import FilterDialog
+from finereader import (OcrSettings, OcrCancelled, validate_executable,
+                        convert_document, test_connection)
 
 
 class Application(tk.Tk):
@@ -24,6 +26,13 @@ class Application(tk.Tk):
         self.minsize(1050, 650)
         self.configure(bg='#edf1f5')
         self.path = None
+        self.original_path = None
+        self.ocr_cache = None
+        self.cache_exe = None
+        self.cache_source_stamp = None
+        self.ocr_settings = OcrSettings()
+        self.cancel_event = threading.Event()
+        self.closing = False
         self.findings = []
         self.warnings = []
         self.omit_pages = set()
@@ -43,6 +52,9 @@ class Application(tk.Tk):
         self.busy = False
         self.filters_stale = False
         self._build()
+        self.protocol('WM_DELETE_WINDOW', self.close_app)
+        if self.ocr_settings.error:
+            self.status.set('OCR ayarları okunamadı. OCR motorunu yeniden seçip kaydedin.')
         self.after(100, self._process_events)
 
     def _build(self):
@@ -70,6 +82,23 @@ class Application(tk.Tk):
         ttk.Label(line, text='Ek gizlenecek ifadeler (virgülle ayır):').pack(side='left')
         self.terms = ttk.Entry(line, width=85)
         self.terms.pack(side='left', fill='x', expand=True, padx=(8, 0))
+        ocr_line = ttk.Frame(self, padding=(10, 0, 10, 7))
+        ocr_line.pack(fill='x')
+        ttk.Label(ocr_line, text='OCR motoru:').pack(side='left')
+        self.ocr_engine = tk.StringVar(value=self.ocr_settings.data['engine'])
+        self.engine_combo = ttk.Combobox(ocr_line, textvariable=self.ocr_engine,
+                                        values=('Tesseract', 'FineReader'), state='readonly', width=14)
+        self.engine_combo.pack(side='left', padx=7)
+        self.engine_combo.bind('<<ComboboxSelected>>', self.ocr_engine_changed)
+        self.fr_button = ttk.Button(ocr_line, text='FineReader Konumu', command=self.choose_finereader)
+        self.fr_button.pack(side='left', padx=3)
+        self.fr_test_button = ttk.Button(ocr_line, text='Bağlantıyı Dene', command=self.test_finereader)
+        self.fr_test_button.pack(side='left', padx=3)
+        self.cancel_button = ttk.Button(ocr_line, text='İptal', command=self.cancel_operation, state='disabled')
+        self.cancel_button.pack(side='left', padx=3)
+        self.fr_info = tk.StringVar(value='FineReader: ' + ('konum kayıtlı; deneme yapılabilir'
+                                    if self.ocr_settings.data['finereader_exe'] else 'konum seçilmedi'))
+        ttk.Label(ocr_line, textvariable=self.fr_info).pack(side='left', padx=8)
         self.progress = ttk.Progressbar(self, mode='determinate')
         self.progress.pack(fill='x', padx=10, pady=(0, 4))
         self.status = tk.StringVar(value='PDF seçin. Dosyalar bilgisayarınızdan dışarı gönderilmez.')
@@ -140,10 +169,83 @@ class Application(tk.Tk):
                              'Çıktıyı Gemini’ye göndermeden önce mutlaka gözden geçirin.',
                   wraplength=295, justify='left').pack(anchor='w', pady=7)
 
-    def set_busy(self, busy):
+    def set_busy(self, busy, cancellable=False):
         self.busy = busy
-        for button in (self.open_button, self.filter_button, self.scan_button):
+        for button in (self.open_button, self.filter_button, self.scan_button,
+                       self.fr_button, self.fr_test_button):
             button.config(state='disabled' if busy else 'normal')
+        self.engine_combo.config(state='disabled' if busy else 'readonly')
+        self.cancel_button.config(state='normal' if busy and cancellable else 'disabled')
+
+    def ocr_engine_changed(self, _event=None):
+        self.filters_stale = True
+        self.export_button.config(state='disabled')
+        try:
+            self.ocr_settings.save(self.ocr_engine.get(), self.ocr_settings.data['finereader_exe'])
+        except OSError as exc:
+            messagebox.showerror('OCR ayarı kaydedilemedi', str(exc))
+        self.status.set('OCR motoru değişti. Tüm Sayfaları Tara ile yeniden tarayın.')
+
+    def choose_finereader(self):
+        if self.busy:
+            return
+        filename = filedialog.askopenfilename(title='Çalışan tam FineReader klasöründeki FineReaderOCR.exe dosyasını seçin',
+                        initialfile='FineReaderOCR.exe', filetypes=[('FineReader OCR', '*.exe')])
+        if not filename:
+            return
+        try:
+            exe = validate_executable(filename)
+            self.ocr_settings.save('FineReader', str(exe))
+        except (ValueError, OSError) as exc:
+            messagebox.showerror('FineReader konumu', str(exc))
+            return
+        self.ocr_engine.set('FineReader')
+        self.filters_stale = True
+        self.export_button.config(state='disabled')
+        self.fr_info.set('FineReader: konum kayıtlı; Bağlantıyı Dene ile kontrol edin')
+        self.status.set('FineReader konumu kaydedildi. Bağlantıyı Dene veya Tüm Sayfaları Tara düğmesini kullanın.')
+
+    def _progress(self, n, total, text):
+        if self.cancel_event.is_set():
+            raise OcrCancelled('İşlem iptal edildi.')
+        self.events.put(('progress', n, total, text))
+
+    def test_finereader(self):
+        if self.busy:
+            return
+        exe = self.ocr_settings.data['finereader_exe']
+        try:
+            validate_executable(exe)
+        except (ValueError, OSError) as exc:
+            messagebox.showinfo('FineReader seçin', str(exc))
+            return
+        self.cancel_event.clear()
+        self.set_busy(True, cancellable=True)
+        self.export_button.config(state='disabled')
+        self.status.set('FineReader bağlantısı görüntülü örnek bir sayfayla deneniyor...')
+        def run():
+            try:
+                result = test_connection(exe, cancel=self.cancel_event, progress=self._progress)
+                self.events.put(('fr_test_done', result))
+            except OcrCancelled as exc:
+                self.events.put(('cancelled', str(exc)))
+            except Exception as exc:
+                self.events.put(('error', str(exc)))
+        threading.Thread(target=run, daemon=True).start()
+
+    def cancel_operation(self):
+        self.cancel_event.set()
+        self.cancel_button.config(state='disabled')
+        self.status.set('İşlemin durması bekleniyor...')
+
+    def close_app(self):
+        if self.busy:
+            self.closing = True
+            self.cancel_operation()
+            return
+        if self.ocr_cache:
+            self.ocr_cache.cleanup()
+        self.destroy()
 
     def manage_filters(self):
         if not self.busy:
@@ -169,6 +271,12 @@ class Application(tk.Tk):
             messagebox.showerror('PDF açılamadı', str(exc))
             return
         self.path = filename
+        self.original_path = filename
+        if self.ocr_cache:
+            self.ocr_cache.cleanup()
+            self.ocr_cache = None
+        self.cache_exe = None
+        self.cache_source_stamp = None
         self.findings = []
         self.warnings = []
         self.omit_pages.clear()
@@ -224,7 +332,7 @@ class Application(tk.Tk):
                                      outline=color, width=width)
 
     def _drag_start(self, event):
-        if self.path is None:
+        if self.path is None or self.busy:
             return
         self.drag_start = (event.x, event.y)
 
@@ -252,6 +360,8 @@ class Application(tk.Tk):
         self.show_page()
 
     def clear_manual(self):
+        if self.busy:
+            return
         self.manual[self.page_no].clear()
         self.show_page()
 
@@ -266,18 +376,59 @@ class Application(tk.Tk):
             return
         terms = tuple(t.strip() for t in self.terms.get().split(',') if t.strip())
         filter_data = self.filter_store.snapshot()
+        engine = self.ocr_engine.get()
+        exe = self.ocr_settings.data['finereader_exe']
+        if engine == 'FineReader':
+            try:
+                validate_executable(exe)
+            except (ValueError, OSError) as exc:
+                messagebox.showinfo('FineReader konumu gerekli', str(exc))
+                return
+        try:
+            stat = Path(self.original_path).stat()
+            source_stamp = (stat.st_size, stat.st_mtime_ns)
+        except OSError as exc:
+            messagebox.showerror('Kaynak PDF okunamadı', str(exc))
+            return
+        cache = self.ocr_cache if (engine == 'FineReader' and self.cache_exe == exe
+                    and self.cache_source_stamp == source_stamp) else None
+        next_path = str(cache.path) if cache else self.original_path
+        path_may_change = (engine == 'FineReader' and cache is None) or next_path != self.path
+        if any(self.manual.values()) and path_may_change:
+            if not messagebox.askyesno('OCR çalışma sayfaları',
+                    'OCR motoru yeni bir çalışma PDF’si kullanacak. Elle çizdiğiniz karartmaları yeni sayfalar üzerinde '
+                    'tekrar çizmeniz gerekecek. Yeniden tarama başlasın mı?'):
+                return
+        self.cancel_event.clear()
         self.filters_stale = True
-        self.set_busy(True)
+        self.set_busy(True, cancellable=True)
         self.scan_button.config(state='disabled')
         self.export_button.config(state='disabled')
         self.progress['value'] = 0
-        path = self.path
+        path = self.original_path
         def run():
+            converted = None
             try:
-                found, warnings = scan_pdf(path, terms, lambda n, total, msg:
-                    self.events.put(('progress', n, total, msg)), use_ocr=True, filter_data=filter_data)
-                self.events.put(('scan_done', found, warnings))
+                working = cache
+                if engine == 'FineReader' and working is None:
+                    converted = convert_document(exe, path, cancel=self.cancel_event, progress=self._progress)
+                    working = converted
+                after = Path(path).stat()
+                if (after.st_size, after.st_mtime_ns) != source_stamp:
+                    raise RuntimeError('Kaynak PDF işlem sırasında değişti. Dosyayı yeniden açıp tarayın.')
+                working_path = str(working.path) if working else path
+                found, warnings = scan_pdf(working_path, terms, self._progress,
+                    use_ocr=engine == 'Tesseract', filter_data=filter_data, external_ocr=engine == 'FineReader')
+                if self.cancel_event.is_set():
+                    raise OcrCancelled('İşlem iptal edildi.')
+                self.events.put(('scan_done', found, warnings, working_path, converted, exe, engine, source_stamp))
+            except OcrCancelled as exc:
+                if converted:
+                    converted.cleanup()
+                self.events.put(('cancelled', str(exc)))
             except Exception as exc:
+                if converted:
+                    converted.cleanup()
                 self.events.put(('error', type(exc).__name__ + ': ' + str(exc)))
         threading.Thread(target=run, daemon=True).start()
 
@@ -293,28 +444,62 @@ class Application(tk.Tk):
                 elif kind == 'scan_done':
                     self.set_busy(False)
                     self.filters_stale = False
-                    self.findings, self.warnings = data
+                    found, warnings, working_path, converted, exe, engine, source_stamp = data
+                    if self.path != working_path:
+                        self.manual.clear()
+                    self.path = working_path
+                    if converted:
+                        if self.ocr_cache:
+                            self.ocr_cache.cleanup()
+                        self.ocr_cache = converted
+                        self.cache_exe = exe
+                        self.cache_source_stamp = source_stamp
+                    with fitz.open(self.path) as doc:
+                        self.page_count = len(doc)
+                    self.page_no = min(self.page_no, self.page_count - 1)
+                    self.page_text.set(f'Sayfa {self.page_no + 1} / {self.page_count}')
+                    self.findings, self.warnings = found, warnings
                     self._update_lists()
                     self.scan_button.config(state='normal')
                     self.export_button.config(state='normal')
-                    self.status.set(f'Tarama tamamlandı: {len(self.findings)} bulgu, {len(self.omit_pages)} riskli sayfa.')
+                    self.status.set(f'{engine} taraması tamamlandı: {len(self.findings)} bulgu, {len(self.omit_pages)} riskli sayfa.')
+                    if engine == 'FineReader':
+                        self.fr_info.set('FineReader: OCR çıktısı otomatik alındı ve filtrelendi')
                     self.show_page()
+                elif kind == 'fr_test_done':
+                    self.set_busy(False)
+                    self.fr_info.set('FineReader: örnek OCR ve otomatik çıktı doğrulandı')
+                    self.status.set(data[0])
+                    if self.findings and not self.filters_stale:
+                        self.export_button.config(state='normal')
+                    if not self.closing:
+                        messagebox.showinfo('Bağlantı başarılı', data[0])
+                elif kind == 'cancelled':
+                    self.set_busy(False)
+                    self.status.set(data[0])
+                    if self.findings and not self.filters_stale:
+                        self.export_button.config(state='normal')
                 elif kind == 'export_done':
                     self.set_busy(False)
                     self.scan_button.config(state='normal')
                     self.export_button.config(state='normal')
                     self.status.set('Temiz PDF oluşturuldu: ' + data[0])
-                    messagebox.showinfo('İşlem tamamlandı',
-                                        'PDF kaydedildi. Gemini’ye yüklemeden önce dosyayı görsel olarak inceleyin.\n\n' + data[0])
+                    if not self.closing:
+                        messagebox.showinfo('İşlem tamamlandı',
+                                            'PDF kaydedildi. Gemini’ye yüklemeden önce dosyayı görsel olarak inceleyin.\n\n' + data[0])
                 elif kind == 'error':
                     self.set_busy(False)
                     self.scan_button.config(state='normal')
                     if self.findings and not self.filters_stale:
                         self.export_button.config(state='normal')
                     self.status.set('HATA: ' + data[0])
-                    messagebox.showerror('İşlem başarısız', data[0])
+                    if not self.closing:
+                        messagebox.showerror('İşlem başarısız', data[0])
         except queue.Empty:
             pass
+        if self.closing and not self.busy:
+            self.close_app()
+            return
         self.after(100, self._process_events)
 
     def _update_lists(self):
@@ -358,6 +543,8 @@ class Application(tk.Tk):
                                'OCR başarısız sayfa onaylanamaz.')
 
     def _toggle_group(self, event):
+        if self.busy:
+            return
         item = self.tree.identify_row(event.y)
         key = self._item_keys.get(item)
         if not key:
@@ -380,6 +567,8 @@ class Application(tk.Tk):
             self.goto(int(selected[0].replace('risk', '')))
 
     def toggle_risk(self, event):
+        if self.busy:
+            return
         row = self.risks.identify_row(event.y)
         if not row.startswith('risk'):
             return
@@ -415,7 +604,7 @@ class Application(tk.Tk):
             return
         output = filedialog.asksaveasfilename(
             title='Yeni anonim PDF', defaultextension='.pdf',
-            initialfile=Path(self.path).stem + '_ANONIM.pdf',
+            initialfile=Path(self.original_path or self.path).stem + '_ANONIM.pdf',
             filetypes=[('PDF', '*.pdf')])
         if not output:
             return
