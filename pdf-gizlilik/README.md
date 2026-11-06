@@ -9,14 +9,14 @@ Windows'ta çalışan, kaynak PDF'yi değiştirmeden yeni bir karartılmış PDF
 2. ZIP dosyasını klasöre çıkarın; `PDF-Gizlilik.exe` dosyasını çalıştırın.
 3. **PDF Aç > Tüm Sayfaları Tara** deyin. Firma, koordinat, adres, ada/parsel vb eşleşmeler listelenir.
 4. Tekrarlanan bilgilerin birine çift tıklayarak tamamını seçebilir veya seçimi kaldırabilirsiniz. Önizlemede fareyle ilave karartma alanları çizin.
-5. Harita ve büyük pafta sayfaları **varsayılan olarak çıktıya alınmaz**; bunlar için tek tek görsel kontrol ve onay gerekir. OCR başarısız sayfalar kesinlikle dışlanır.
-6. **Temiz PDF Oluştur** ile yeni dosyayı kaydedin; Gemini'ye göndermeden önce dosyayı gözle inceleyin.
+5. **Yüksek riskli sayfalar** listesinden bir satıra tıklayın. Sayfa ortada açılır. **ELLE KARARTIN** yazıyorsa gizlenecek alanları fareyle sürükleyerek işaretleyin. İncelediğiniz sayfaları **Seçilenleri Onayla** veya **Tümünü Onayla** ile çıktıya ekleyin.
+6. **Temiz PDF Oluştur** ekranında çıktıdaki sayfa sayısını kontrol edin ve yeni dosyayı kaydedin. Paylaşmadan önce kaydedilen PDF’yi gözden geçirin.
 
 ## Güvenlik sınırları
 
 - Bu araç Tamga ile *entegre değildir*; Tamga'daki politika fikrinden yararlanan yerel bir kural motorudur.
 - Firma adı, açık adres ve kişi isimleri için düzenli ifadeler kusursuz tanıma sağlamaz. **Ek gizlenecek ifadeler** alanında bilinen unvanları ve şahıs adlarını girin.
-- OCR büyük görüntüleri bölerek tarar. Yanlış okunan koordinatları kaçırabilir; OCR taraması yapılamayan sayfalar çıktıdan çıkarılır.
+- OCR büyük görüntüleri bölerek tarar. Yanlış okunan koordinatları kaçırabilir. OCR eksik sayfalar elle karartılıp onaylanana kadar dışlanır.
 - Harita geometrisi, uydu görüntüsü, yer adları, meta veri veya başka işaretler de konum ifşa edebilir. İnsan kontrolü olmadan gizlilik garantisi verilemez.
 - Her sayfa çıktıya dahil edilmez. Özellikle paftalar risk listesinde `DIŞLA` olarak başlar. Bir paftayı onaylamak konumun kesin gizli olduğuna dair teknik güvence değildir.
 - Çıktı dosyası kaynak dosyadan farklı olmalıdır, üzerine yazılmaz. Orijinal belge korunur ama **otomatik yedek alınmaz**.

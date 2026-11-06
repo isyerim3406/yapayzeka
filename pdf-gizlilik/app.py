@@ -26,12 +26,13 @@ MAX_PREVIEW_PIXELS = 16_000_000
 class Application(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('PDF Gizlilik v5 | Çevrimdışı Anonimleştirme')
+        self.title('PDF Gizlilik v6 | Çevrimdışı Anonimleştirme')
         self.geometry('1320x830')
         self.minsize(1050, 650)
         self.configure(bg='#edf1f5')
         self.path = None
         self.original_path = None
+        self.source_stamp = None
         self.ocr_cache = None
         self.cache_exe = None
         self.cache_source_stamp = None
@@ -41,7 +42,8 @@ class Application(tk.Tk):
         self.findings = []
         self.warnings = []
         self.omit_pages = set()
-        self.mandatory_omit = set()
+        self.manual_required = set()
+        self._risk_info = defaultdict(list)
         self.approved_pages = set()
         self.manual = defaultdict(list)
         self.groups = {}
@@ -79,7 +81,7 @@ class Application(tk.Tk):
         self.scan_button.pack(side='left', padx=3)
         self.export_button = ttk.Button(top, text='Temiz PDF Oluştur', command=self.start_export, state='disabled')
         self.export_button.pack(side='left', padx=3)
-        self.ocr_status = ttk.Label(top, text='OCR: hazır' if ocr_available() else 'OCR: yok — taranmış sayfalar dışlanır')
+        self.ocr_status = ttk.Label(top, text='OCR: hazır' if ocr_available() else 'OCR: yok — taranmış sayfaları elle inceleyin')
         self.ocr_status.pack(side='right')
 
         line = ttk.Frame(self, padding=(10, 0, 10, 7))
@@ -179,21 +181,23 @@ class Application(tk.Tk):
                    command=self.clear_manual).pack(fill='x')
 
         ttk.Label(right, text='Yüksek riskli sayfalar', font=('Segoe UI', 10, 'bold')).pack(anchor='w')
-        ttk.Label(right, text='Ctrl ile ayrı sayfaları, Shift ile bir aralığı seçin. '
-                              'Çift tıklayarak tek bir sayfanın durumunu değiştirin.',
-                  wraplength=260).pack(anchor='w', pady=5)
+        ttk.Label(right, text='Bir satıra tıklayın, sayfa ortada açılır. OCR eksikse gizlenecek '
+                              'alanları sürükleyerek işaretleyin ve sayfayı onaylayın. '
+                              'Ctrl veya Shift ile birden çok sayfa seçin.',
+                  wraplength=295).pack(anchor='w', pady=5)
         risk_list = ttk.Frame(right)
         risk_list.pack(fill='both', expand=True)
         self.risks = ttk.Treeview(risk_list, columns=('state', 'reason'), show='headings', selectmode='extended')
         self.risks.heading('state', text='Sayfa / durum')
         self.risks.heading('reason', text='Uyarı')
-        self.risks.column('state', width=110, stretch=False)
-        self.risks.column('reason', width=225, stretch=True)
+        self.risks.column('state', width=145, stretch=False)
+        self.risks.column('reason', width=190, stretch=True)
         risk_scroll = ttk.Scrollbar(risk_list, orient='vertical', command=self.risks.yview)
         self.risks.configure(yscrollcommand=risk_scroll.set)
         risk_scroll.pack(side='right', fill='y')
         self.risks.pack(side='left', fill='both', expand=True)
         self.risks.bind('<Double-1>', self.toggle_risk)
+        self.risks.bind('<ButtonRelease-1>', self.show_clicked_risk)
         self.risks.bind('<<TreeviewSelect>>', self.select_risk)
         risk_actions = ttk.Frame(right)
         risk_actions.pack(fill='x', pady=(5, 0))
@@ -212,7 +216,7 @@ class Application(tk.Tk):
         ttk.Label(right, text='Güvenlik sınırı:', font=('Segoe UI', 10, 'bold')).pack(anchor='w')
         ttk.Label(right, text='Konumu harita geometrisi, uydu görüntüsü veya topoğrafyadan tanımak mümkün olabilir.\n'
                              'Otomatik karartma tam anonimlik garantisi değildir.\n'
-                             'OCR başarısız sayfalar çıktıdan zorunlu olarak çıkarılır.\n'
+                             'OCR eksik sayfalar elle karartılıp onaylandığında çıktıya eklenir.\n'
                              'Çıktıyı Gemini’ye göndermeden önce mutlaka gözden geçirin.',
                   wraplength=295, justify='left').pack(anchor='w', pady=7)
 
@@ -329,6 +333,7 @@ class Application(tk.Tk):
         if not filename:
             return
         try:
+            stat = Path(filename).stat()
             with fitz.open(filename) as doc:
                 if doc.needs_pass:
                     raise ValueError('Parolalı PDF desteklenmiyor.')
@@ -338,6 +343,7 @@ class Application(tk.Tk):
             return
         self.path = filename
         self.original_path = filename
+        self.source_stamp = (stat.st_size, stat.st_mtime_ns)
         if self.ocr_cache:
             self.ocr_cache.cleanup()
             self.ocr_cache = None
@@ -347,7 +353,8 @@ class Application(tk.Tk):
         self.filters_stale = False
         self.warnings = []
         self.omit_pages.clear()
-        self.mandatory_omit.clear()
+        self.manual_required.clear()
+        self._risk_info.clear()
         self.approved_pages.clear()
         self.manual.clear()
         self.zoom_index = FIT_ZOOM
@@ -455,14 +462,22 @@ class Application(tk.Tk):
         self.drag_start = None
         self.canvas.delete('preview-mark', 'dragbox')
         excluded = self.page_no in self.omit_pages
-        self.view_hint.configure(text='Çıktıdan dışlanacak' if excluded else 'Sürükle ve karart',
+        if self.page_no in self._blocked_risk_pages():
+            hint = 'Sürükleyerek karartın, sonra onaylayın'
+        elif excluded:
+            hint = 'Çıktıya eklemek için onaylayın'
+        elif self.page_no in self.approved_pages:
+            hint = 'Onaylı · Çıktıya dahil'
+        else:
+            hint = 'Sürükle ve karart'
+        self.view_hint.configure(text=hint,
                                  foreground='#b91c1c' if excluded else '#172533')
         if self.preview_bounds is None:
             return
         for finding in self.findings:
             if finding.page == self.page_no and finding.selected and not self.filters_stale:
                 self._draw_pdf_rect(finding.rect, '#eab308', 2)
-        for rect in self.manual[self.page_no]:
+        for rect in self.manual.get(self.page_no, ()):
             self._draw_pdf_rect(rect, '#dc2626', 3)
 
     def _draw_pdf_rect(self, rect, color, width):
@@ -501,10 +516,10 @@ class Application(tk.Tk):
             self.canvas.delete('dragbox')
             return
         self.manual[self.page_no].append(tuple(area))
-        self._refresh_export_button()
+        self._refresh_risk_state()
         self._draw_preview_marks()
         if self.page_no in self.omit_pages:
-            self.status.set('Alan işaretlendi. Bu sayfa şu anda çıktıdan dışlanıyor.')
+            self.status.set('Alan işaretlendi. Sayfayı kontrol edin ve çıktıya eklemek için sağdan onaylayın.')
         else:
             self.status.set(f'Bu sayfada elle işaretlenen {len(self.manual[self.page_no])} karartma alanı var. '
                             'Kaydetmek için Temiz PDF Oluştur’a basın.')
@@ -512,10 +527,16 @@ class Application(tk.Tk):
     def clear_manual(self):
         if self.busy:
             return
-        self.manual[self.page_no].clear()
-        self._refresh_export_button()
+        removed = self.manual.pop(self.page_no, None)
+        revoked = bool(removed and self.page_no in self.approved_pages)
+        if revoked:
+            self.approved_pages.remove(self.page_no)
+        self._refresh_risk_state()
         self._draw_preview_marks()
-        self.status.set('Bu sayfanın elle karartma işaretleri kaldırıldı.')
+        if revoked:
+            self.status.set('Elle karartmalar ve sayfa onayı kaldırıldı. Sayfa çıktıdan dışlanacak.')
+        else:
+            self.status.set('Bu sayfanın elle karartma işaretleri kaldırıldı.')
 
     def start_scan(self):
         if self.busy:
@@ -545,8 +566,9 @@ class Application(tk.Tk):
         cache = self.ocr_cache if (engine == 'FineReader' and self.cache_exe == exe
                     and self.cache_source_stamp == source_stamp) else None
         next_path = str(cache.path) if cache else self.original_path
-        path_may_change = (engine == 'FineReader' and cache is None) or next_path != self.path
-        if any(self.manual.values()) and path_may_change:
+        working_pdf_may_change = (source_stamp != self.source_stamp or next_path != self.path
+                                  or (engine == 'FineReader' and cache is None))
+        if self.manual and working_pdf_may_change:
             if not messagebox.askyesno('OCR çalışma sayfaları',
                     'OCR motoru yeni bir çalışma PDF’si kullanacak. Elle çizdiğiniz karartmaları yeni sayfalar üzerinde '
                     'tekrar çizmeniz gerekecek. Yeniden tarama başlasın mı?'):
@@ -624,11 +646,13 @@ class Application(tk.Tk):
                 elif kind == 'scan_done':
                     self.filters_stale = False
                     found, warnings, working_path, converted, exe, engine, source_stamp = data
-                    if self.path != working_path:
+                    same_pdf = self.path == working_path and self.source_stamp == source_stamp
+                    if not same_pdf:
                         self.manual.clear()
                         self.view_rotations.clear()
                         self.preview_bounds = None
                     self.path = working_path
+                    self.source_stamp = source_stamp
                     if converted:
                         if self.ocr_cache:
                             self.ocr_cache.cleanup()
@@ -640,9 +664,10 @@ class Application(tk.Tk):
                     self.page_no = min(self.page_no, self.page_count - 1)
                     self.page_text.set(f'Sayfa {self.page_no + 1} / {self.page_count}')
                     self.findings, self.warnings = found, warnings
-                    self._update_lists()
+                    self._update_lists(preserve_approvals=same_pdf)
                     self.set_busy(False)
-                    self.status.set(f'{engine} taraması tamamlandı: {len(self.findings)} bulgu, {len(self.omit_pages)} riskli sayfa.')
+                    self.status.set(f'{engine} taraması tamamlandı. {len(self.findings)} bulgu, '
+                                    f'{len(self._risk_info)} riskli sayfa, {len(self.approved_pages)} sayfa onaylı.')
                     if engine == 'FineReader':
                         self.fr_info.set('FineReader: OCR çıktısı otomatik alındı ve filtrelendi')
                     self.show_page()
@@ -651,7 +676,7 @@ class Application(tk.Tk):
                     self._merge_retry_results(pages, found, warnings)
                     self.set_busy(False)
                     self.status.set(f'{len(pages)} sayfa yeniden tarandı. '
-                                    f'{len(self.mandatory_omit)} sayfanın zorunlu dışlaması sürüyor.')
+                                    f'{len(self._blocked_risk_pages())} sayfa elle karartma bekliyor.')
                     self._draw_preview_marks()
                 elif kind == 'fr_test_done':
                     self.set_busy(False)
@@ -663,11 +688,12 @@ class Application(tk.Tk):
                     self.set_busy(False)
                     self.status.set(data[0])
                 elif kind == 'export_done':
+                    path, page_count = data
                     self.set_busy(False)
-                    self.status.set('Temiz PDF oluşturuldu: ' + data[0])
+                    self.status.set(f'Temiz PDF oluşturuldu ({page_count} sayfa). {path}')
                     if not self.closing:
                         messagebox.showinfo('İşlem tamamlandı',
-                                            'PDF kaydedildi. Gemini’ye yüklemeden önce dosyayı görsel olarak inceleyin.\n\n' + data[0])
+                                            f'{page_count} sayfalık PDF kaydedildi. Paylaşmadan önce gözden geçirin.\n\n{path}')
                 elif kind == 'error':
                     self.set_busy(False)
                     self.status.set('HATA: ' + data[0])
@@ -717,33 +743,50 @@ class Application(tk.Tk):
                 if keys:
                     self._item_keys[item] = keys[0]
         self.risks.delete(*self.risks.get_children())
-        self.mandatory_omit = {w.page for w in self.warnings if 'OCR' in w.reason or 'uygun değil' in w.reason}
-        self._risk_info = defaultdict(list)
+        manual_required = {w.page for w in self.warnings if 'OCR' in w.reason or 'uygun değil' in w.reason}
+        if preserve_approvals:
+            self.approved_pages.difference_update(manual_required - self.manual_required)
+        else:
+            self.approved_pages.clear()
+        self.manual_required = manual_required
+        self._risk_info.clear()
         for w in self.warnings:
             self._risk_info[w.page].append(w.reason)
-        if not preserve_approvals:
-            self.approved_pages.clear()
-        self.approved_pages.intersection_update(self._risk_info)
-        self.approved_pages.difference_update(self.mandatory_omit)
-        self.omit_pages = set(self._risk_info) - self.approved_pages
         for n in sorted(self._risk_info):
-            title = 'ZORUNLU DIŞLA' if n in self.mandatory_omit else 'DIŞLA'
-            if n in self.approved_pages:
-                title = 'ONAYLI'
-            self.risks.insert('', 'end', iid=f'risk{n}', values=(f'{n + 1} · {title}', ' / '.join(self._risk_info[n])[:115]))
-        self._risk_summary()
+            self.risks.insert('', 'end', iid=f'risk{n}', values=('', ' / '.join(self._risk_info[n])[:115]))
+        self._refresh_risk_state()
 
-    def _risk_summary(self):
-        pending = len(self.omit_pages - self.mandatory_omit)
-        self.warning_total.set(f'{len(self.omit_pages)} / {self.page_count} sayfa çıktıdan çıkarılacak. '
-                               f'{pending} sayfa onay bekliyor, {len(self.mandatory_omit)} sayfa zorunlu dışlanıyor.')
+    def _blocked_risk_pages(self):
+        return {page for page in self.manual_required if not self.manual.get(page)}
+
+    def _refresh_risk_state(self):
+        blocked = self._blocked_risk_pages()
+        self.approved_pages.intersection_update(self._risk_info.keys() - blocked)
+        self.omit_pages = self._risk_info.keys() - self.approved_pages
+        for page in self._risk_info:
+            if page in self.approved_pages:
+                title = 'ELLE ONAYLI' if page in self.manual_required else 'ONAYLI'
+            elif page in blocked:
+                title = 'ELLE KARARTIN'
+            elif page in self.manual_required:
+                title = 'ONAY BEKLİYOR'
+            else:
+                title = 'DIŞLA'
+            self.risks.set(f'risk{page}', 'state', f'{page + 1} · {title}')
+        omitted = len(self.omit_pages)
+        summary = (f'Çıktıya dahil {self.page_count - omitted} / {self.page_count} sayfa.\n'
+                   f'{len(self.approved_pages)} riskli sayfa onaylı. {omitted} sayfa dışlanacak.')
+        if blocked:
+            summary += f'\n{len(blocked)} sayfa elle karartma bekliyor.'
+        self.warning_total.set(summary)
         self._refresh_risk_buttons()
+        self._refresh_export_button()
 
     def _selected_risk_pages(self):
         return {int(row[4:]) for row in self.risks.selection()}
 
     def _refresh_risk_buttons(self):
-        available = self.omit_pages - self.mandatory_omit
+        available = self.omit_pages - self._blocked_risk_pages()
         selected = available & self._selected_risk_pages()
         self.approve_selected_button.configure(state='normal' if selected and not self.busy else 'disabled')
         self.approve_all_button.configure(state='normal' if available and not self.busy else 'disabled')
@@ -754,29 +797,33 @@ class Application(tk.Tk):
         if self.busy:
             return
         candidates = self.omit_pages if all_pages else self.omit_pages & self._selected_risk_pages()
-        pages = candidates - self.mandatory_omit
+        self._approve_risk_pages(candidates)
+
+    def _approve_risk_pages(self, candidates):
+        blocked = candidates & self._blocked_risk_pages()
+        pages = candidates - blocked
         if not pages:
+            if blocked:
+                messagebox.showwarning('Elle karartma gerekli',
+                    'Sayfayı ortadaki görüntüleyicide açıp gizlenecek alanları sürükleyerek işaretleyin. '
+                    'Ardından sayfayı onaylayın.')
             return
-        message = (f'{len(pages)} riskli sayfa çıktı PDF’sine dahil edilecek. '
-                   'Harita veya pafta görüntüsü konumu açığa çıkarabilir.')
-        blocked = len(candidates & self.mandatory_omit)
+        message = (f'{len(pages)} riskli sayfa çıktı PDF’sine dahil edilecek.\n'
+                   'Karartma alanlarını ve konumu belli edebilecek görselleri gözden geçirin.')
+        manual_count = len(pages & self.manual_required)
+        if manual_count:
+            message += f'\n{manual_count} sayfada OCR eksik. Gizlenecek tüm alanları elle kontrol edin.'
         if blocked:
-            message += f'\n{blocked} sayfa zorunlu dışlama nedeniyle çıktı dışında kalacak.'
+            message += f'\n{len(blocked)} sayfa elle karartılana kadar dışlanacak.'
         if messagebox.askyesno('Riskli sayfaları onayla', message + '\n\nBu sayfaları inceleyip onaylıyor musunuz?'):
             self._set_risks_approved(pages, True)
 
     def _set_risks_approved(self, pages, approved):
         if approved:
             self.approved_pages.update(pages)
-            self.omit_pages.difference_update(pages)
         else:
             self.approved_pages.difference_update(pages)
-            self.omit_pages.update(pages)
-        title = 'ONAYLI' if approved else 'DIŞLA'
-        for page in pages:
-            self.risks.set(f'risk{page}', 'state', f'{page + 1} · {title}')
-        self._risk_summary()
-        self._refresh_export_button()
+        self._refresh_risk_state()
         self._draw_preview_marks()
 
     def _toggle_group(self, event):
@@ -805,9 +852,12 @@ class Application(tk.Tk):
         if selected:
             focused = self.risks.focus()
             row = focused if focused in selected else selected[0]
-            page = int(row[4:])
-            if self.page_no != page:
-                self.goto(page)
+            self.goto(int(row[4:]))
+
+    def show_clicked_risk(self, event):
+        row = self.risks.identify_row(event.y)
+        if row:
+            self.goto(int(row[4:]))
 
     def toggle_risk(self, event):
         if self.busy:
@@ -816,15 +866,9 @@ class Application(tk.Tk):
         if not row.startswith('risk'):
             return
         n = int(row[4:])
-        if n in self.mandatory_omit:
-            messagebox.showwarning('Kapatılamayan risk', 'Bu sayfada OCR tamamlanamadı. Çıktıdan çıkarılması zorunlu.')
-            return
+        self.goto(n)
         if n in self.omit_pages:
-            if not messagebox.askyesno('Konum gizliliği uyarısı',
-                    f'Sayfa {n+1} harita, koordinat ızgarası veya uydu görünümünden konumu açığa çıkarabilir. '
-                    'Bu sayfayı gözle kontrol edip Gemini’ye gönderilmesini kabul ediyor musunuz?'):
-                return
-            self._set_risks_approved({n}, True)
+            self._approve_risk_pages({n})
         else:
             self._set_risks_approved({n}, False)
 
@@ -848,16 +892,24 @@ class Application(tk.Tk):
             messagebox.showerror('Üzerine yazma engellendi', 'Çıktı zaten var. Yeni ad seçin.')
             return
         manual_count = sum(len(rects) for rects in manual.values())
+        omitted_count = len(self.omit_pages)
         if not messagebox.askyesno('Son kontrol',
+                f'Çıktıya {self.page_count - omitted_count} / {self.page_count} sayfa dahil edilecek.\n'
+                f'{len(self.approved_pages)} riskli sayfa onaylı. {omitted_count} sayfa dışlanacak.\n'
                 f'{len(findings)} otomatik bulgu ve {manual_count} elle işaretlenen alan karartılacak.\n'
-                f'{len(self.omit_pages)} sayfa çıkarılacak.\n\nYeni PDF kaydedilsin mi?'):
+                '\nYeni PDF kaydedilsin mi?'):
             return
         self.set_busy(True)
         source, omitted = self.path, set(self.omit_pages)
+        original_path, source_stamp = self.original_path, self.source_stamp
         def run():
             try:
+                stat = Path(original_path).stat()
+                if (stat.st_size, stat.st_mtime_ns) != source_stamp:
+                    raise RuntimeError('Kaynak PDF değişti. Dosyayı yeniden açıp karartma alanlarını kontrol edin.')
                 path = export_pdf(source, output, findings, manual, omitted)
-                self.events.put(('export_done', path))
+                with fitz.open(path) as saved:
+                    self.events.put(('export_done', path, len(saved)))
             except Exception as exc:
                 self.events.put(('error', type(exc).__name__ + ': ' + str(exc)))
         threading.Thread(target=run, daemon=True).start()
