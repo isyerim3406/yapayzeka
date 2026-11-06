@@ -184,7 +184,7 @@ def _ocr_lines(page, zoom=2.0, tile_pts=650, min_confidence=35):
 
 
 def scan_pdf(path: str | Path, custom_terms=(), progress=None, use_ocr=True, filter_data=None,
-             external_ocr=False):
+             external_ocr=False, page_numbers=None, retry_ocr=False):
     """Returns findings and blocking warnings; never writes the original anywhere."""
     from filters import FilterMatcher, FilterStore
     matcher = FilterMatcher(filter_data if filter_data is not None else FilterStore().snapshot())
@@ -195,9 +195,13 @@ def scan_pdf(path: str | Path, custom_terms=(), progress=None, use_ocr=True, fil
             raise ValueError('Parolalı PDF desteklenmiyor; şifresini yerel olarak kaldırın.')
         if not pdf.is_pdf:
             raise ValueError('Yalnızca PDF desteklenir.')
-        for n, page in enumerate(pdf):
+        pages = range(len(pdf)) if page_numbers is None else tuple(dict.fromkeys(page_numbers))
+        for completed, n in enumerate(pages, start=1):
+            if not 0 <= n < len(pdf):
+                raise ValueError('Taranacak sayfa numarası geçersiz.')
             if progress:
-                progress(n + 1, len(pdf), 'Metin ve pafta taraması')
+                progress(completed, len(pages), 'Dışlanan sayfalar yeniden taranıyor' if retry_ocr else 'Metin ve pafta taraması')
+            page = pdf[n]
             words = page.get_text('words', sort=True)
             text_lines = list(extract_lines_from_words(words))
             text_source = 'FineReader OCR' if external_ocr else 'PDF metni'
@@ -208,7 +212,8 @@ def scan_pdf(path: str | Path, custom_terms=(), progress=None, use_ocr=True, fil
             page_area = max(1.0, page.rect.get_area())
             image_area = sum(fitz.Rect(im['bbox']).get_area() for im in imgs if 'bbox' in im)
             large_page = max(page.rect.width, page.rect.height) > 1600
-            needs_ocr = (len(words) < 25 and (bool(imgs) or large_page)) or image_area > page_area * .18 or large_page
+            needs_ocr = retry_ocr or (len(words) < 25 and (bool(imgs) or large_page)) or image_area > page_area * .18 or large_page
+            ocr_lines = []
             if needs_ocr:
                 if external_ocr:
                     if not words:
@@ -219,7 +224,12 @@ def scan_pdf(path: str | Path, custom_terms=(), progress=None, use_ocr=True, fil
                     warnings.append(PageWarning(n, 'Görüntü/pafta OCR taraması yapılmadı.'))
                 else:
                     try:
-                        ocr_lines = list(_ocr_lines(page, zoom=1.8 if large_page else 2.2))
+                        zoom = 1.8 if large_page else 2.2
+                        if retry_ocr:
+                            zoom = 2.8 if large_page else 3.2
+                        ocr_lines = list(_ocr_lines(page, zoom=zoom))
+                        if retry_ocr and not ocr_lines and not words:
+                            warnings.append(PageWarning(n, 'OCR yeniden tarandı ancak metin tanınamadı.'))
                         ocr_findings = matcher.find(ocr_lines, n, 'OCR')
                         for text, mapping in ocr_lines:
                             ocr_findings.extend(find_in_line(text, mapping, n, 'OCR', custom_terms, use_legacy=False))
@@ -234,7 +244,7 @@ def scan_pdf(path: str | Path, custom_terms=(), progress=None, use_ocr=True, fil
             # A site or map can identify the location even after numbers are removed.
             if large_page or image_area > page_area * .4:
                 warnings.append(PageWarning(n, 'Harita/pafta görüntüsü konumu açığa çıkarabilir; görsel inceleme gerekir.'))
-            if not words and not imgs:
+            if not words and not imgs and not ocr_lines:
                 warnings.append(PageWarning(n, 'Sayfa metin/görüntü çıkarmaya uygun değil.'))
     finally:
         pdf.close()
