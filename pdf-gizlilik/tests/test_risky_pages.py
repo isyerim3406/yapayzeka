@@ -1,3 +1,4 @@
+import gc
 import io
 import os
 from pathlib import Path
@@ -18,6 +19,10 @@ from finereader import OcrSettings
 
 @unittest.skipUnless(sys.platform == 'win32' or os.environ.get('DISPLAY'), 'GUI display unavailable')
 class RiskyPagesTests(unittest.TestCase):
+    def setUp(self):
+        # Dispose of previous tests' Tk objects before starting a worker thread.
+        gc.collect()
+
     def wait_for_idle(self, app):
         deadline = time.monotonic() + 10
         while app.busy and time.monotonic() < deadline:
@@ -115,7 +120,7 @@ class RiskyPagesTests(unittest.TestCase):
                   patch('app.filedialog.asksaveasfilename', return_value=str(output)),
                   patch('app.ocr_available', return_value=True),
                   patch('engine.ocr_available', return_value=True),
-                  patch('engine._ocr_lines', side_effect=RuntimeError('OCR test failure')),
+                  patch('engine._ocr_lines', side_effect=RuntimeError),
                   patch('app.messagebox.askyesno', return_value=True) as confirm,
                   patch('app.messagebox.showinfo') as info,
                   patch('app.messagebox.showerror') as showerror):
