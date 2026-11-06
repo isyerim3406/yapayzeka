@@ -47,6 +47,7 @@ class Finding:
     value: str
     source: str
     selected: bool = True
+    line_prefix: bool = False
 
 @dataclass
 class PageWarning:
@@ -184,7 +185,7 @@ def _ocr_lines(page, zoom=2.0, tile_pts=650, min_confidence=35):
 
 
 def scan_pdf(path: str | Path, custom_terms=(), progress=None, use_ocr=True, filter_data=None,
-             external_ocr=False, page_numbers=None, retry_ocr=False):
+             external_ocr=False, page_numbers=None, retry_ocr=False, label_hits=None):
     """Returns findings and blocking warnings; never writes the original anywhere."""
     from filters import FilterMatcher, FilterStore
     matcher = FilterMatcher(filter_data if filter_data is not None else FilterStore().snapshot())
@@ -205,7 +206,8 @@ def scan_pdf(path: str | Path, custom_terms=(), progress=None, use_ocr=True, fil
             words = page.get_text('words', sort=True)
             text_lines = list(extract_lines_from_words(words))
             text_source = 'FineReader OCR' if external_ocr else 'PDF metni'
-            findings.extend(matcher.find(text_lines, n, text_source))
+            page_labels = [] if label_hits is not None else None
+            findings.extend(matcher.find(text_lines, n, text_source, label_hits=page_labels))
             for text, mapping in text_lines:
                 findings.extend(find_in_line(text, mapping, n, text_source, custom_terms, use_legacy=False))
             imgs = page.get_image_info(xrefs=False)
@@ -230,7 +232,8 @@ def scan_pdf(path: str | Path, custom_terms=(), progress=None, use_ocr=True, fil
                         ocr_lines = list(_ocr_lines(page, zoom=zoom))
                         if retry_ocr and not ocr_lines and not words:
                             warnings.append(PageWarning(n, 'OCR yeniden tarandı ancak metin tanınamadı.'))
-                        ocr_findings = matcher.find(ocr_lines, n, 'OCR')
+                        ocr_labels = [] if page_labels is not None else None
+                        ocr_findings = matcher.find(ocr_lines, n, 'OCR', label_hits=ocr_labels)
                         for text, mapping in ocr_lines:
                             ocr_findings.extend(find_in_line(text, mapping, n, 'OCR', custom_terms, use_legacy=False))
                         # OCR sees the rendered orientation. Redaction rectangles use PDF coordinates.
@@ -238,7 +241,12 @@ def scan_pdf(path: str | Path, custom_terms=(), progress=None, use_ocr=True, fil
                             derotation = page.derotation_matrix
                             for finding in ocr_findings:
                                 finding.rect = tuple(fitz.Rect(finding.rect) * derotation)
+                            if ocr_labels is not None:
+                                ocr_labels = [(label, tuple(tuple(fitz.Rect(rect) * derotation) for rect in boxes))
+                                              for label, boxes in ocr_labels]
                         findings.extend(ocr_findings)
+                        if page_labels is not None:
+                            page_labels.extend(ocr_labels)
                     except Exception as exc:
                         warnings.append(PageWarning(n, f'OCR başarısız: {type(exc).__name__}'))
             # A site or map can identify the location even after numbers are removed.
@@ -246,6 +254,8 @@ def scan_pdf(path: str | Path, custom_terms=(), progress=None, use_ocr=True, fil
                 warnings.append(PageWarning(n, 'Harita/pafta görüntüsü konumu açığa çıkarabilir; görsel inceleme gerekir.'))
             if not words and not imgs and not ocr_lines:
                 warnings.append(PageWarning(n, 'Sayfa metin/görüntü çıkarmaya uygun değil.'))
+            if label_hits is not None:
+                label_hits[n] = page_labels
     finally:
         pdf.close()
     # Different extraction layers can identify the same words. Don't redact twice.
@@ -280,11 +290,15 @@ def export_pdf(source, output, findings, manual_rects=None, omitted_pages=None):
     manual_rects = manual_rects or {}
     omitted_pages = set(omitted_pages or ())
     by_page = defaultdict(list)
+    verify_areas = defaultdict(list)
     selected_values = []
     for f in findings:
         if f.selected and f.page not in omitted_pages:
             by_page[f.page].append(f.rect)
-            selected_values.append(f.value)
+            if f.line_prefix:
+                verify_areas[f.page].append(f.rect)
+            else:
+                selected_values.append(f.value)
     for n, rects in manual_rects.items():
         if n not in omitted_pages:
             by_page[n].extend(rects)
@@ -308,6 +322,10 @@ def export_pdf(source, output, findings, manual_rects=None, omitted_pages=None):
                 page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS,
                                       graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED,
                                       text=fitz.PDF_REDACT_TEXT_REMOVE)
+                # A learned prefix is scoped to a row. Identical text elsewhere may be intentional.
+                for rect in verify_areas.get(i, ()):
+                    if page.get_text('words', clip=fitz.Rect(rect)):
+                        raise RuntimeError('Kontrol hatası: öğrenilen bir satırda metin kaldı. Dosya üretilmedi.')
         if not len(doc):
             raise ValueError('Tüm sayfalar çıkarılmış; boş PDF oluşturulamaz.')
         doc.scrub(attached_files=True, embedded_files=True, metadata=True, javascript=True,

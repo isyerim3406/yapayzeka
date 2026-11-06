@@ -11,6 +11,7 @@ Windows'ta çalışan, kaynak PDF'yi değiştirmeden yeni bir karartılmış PDF
 4. Tekrarlanan bilgilerin birine çift tıklayarak tamamını seçebilir veya seçimi kaldırabilirsiniz. Önizlemede fareyle ilave karartma alanları çizin.
 5. **Yüksek riskli sayfalar** listesinden bir satıra tıklayın. Sayfa ortada açılır. **ELLE KARARTIN** yazıyorsa gizlenecek alanları fareyle sürükleyerek işaretleyin. İncelediğiniz sayfaları **Seçilenleri Onayla** veya **Tümünü Onayla** ile çıktıya ekleyin.
 6. **Temiz PDF Oluştur** ekranında çıktıdaki sayfa sayısını kontrol edin ve yeni dosyayı kaydedin. Paylaşmadan önce kaydedilen PDF’yi gözden geçirin.
+7. **Kaydederken başlıkları hatırla** seçiliyken, elle kararttığınız alanla ilişkili `Referans:` gibi satır başı etiketleri son kontrolde gösterilir ve başarılı kayıttan sonra yerel filtrelere eklenir. Sonraki taramalarda bu etiketlerle başlayan satırlar mor çerçeveyle işaretlenir. **Filtre Yönetimi** ile öğrenilen satır başı filtrelerini düzenleyebilir, kapatabilir veya silebilirsiniz.
 
 ## Güvenlik sınırları
 
@@ -22,6 +23,7 @@ Windows'ta çalışan, kaynak PDF'yi değiştirmeden yeni bir karartılmış PDF
 - Çıktı dosyası kaynak dosyadan farklı olmalıdır, üzerine yazılmaz. Orijinal belge korunur ama **otomatik yedek alınmaz**.
 - Çıktıda gömülü dosyalar, JavaScript, metadata ve XML metadata temizlenir. `PyMuPDF` gerçek redaction kullanır.
 - Ek gizlenecek ifadeler ve ilk OCR tanıması yalnızca çalıştıran bilgisayarın RAM'inde tutulur.
+- Başlık hafızası yalnızca etiketi saklar. Öğrenme için satır başlığının PDF metninden veya OCR ile okunabilmesi gerekir.
 
 ## Geliştirme
 

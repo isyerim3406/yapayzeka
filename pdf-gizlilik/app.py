@@ -11,8 +11,8 @@ from tkinter import filedialog, messagebox, ttk
 import fitz
 from PIL import Image, ImageTk
 
-from engine import CATEGORY_ORDER, export_pdf, ocr_available, scan_pdf
-from filters import FilterStore
+from engine import CATEGORY_ORDER, export_pdf, extract_lines_from_words, ocr_available, scan_pdf
+from filters import FilterStore, line_label_hits, new_line_labels
 from filter_dialog import FilterDialog
 from finereader import (OcrSettings, OcrCancelled, validate_executable,
                         convert_document, test_connection)
@@ -26,7 +26,7 @@ MAX_PREVIEW_PIXELS = 16_000_000
 class Application(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('PDF Gizlilik v6 | Çevrimdışı Anonimleştirme')
+        self.title('PDF Gizlilik v7 | Çevrimdışı Anonimleştirme')
         self.geometry('1320x830')
         self.minsize(1050, 650)
         self.configure(bg='#edf1f5')
@@ -40,6 +40,7 @@ class Application(tk.Tk):
         self.cancel_event = threading.Event()
         self.closing = False
         self.findings = []
+        self.label_hits = {}
         self.warnings = []
         self.omit_pages = set()
         self.manual_required = set()
@@ -179,6 +180,9 @@ class Application(tk.Tk):
         self.canvas.bind('<ButtonRelease-1>', self._drag_end)
         ttk.Button(mid, text='Bu sayfadaki elle çizilen karartmaları sil',
                    command=self.clear_manual).pack(fill='x')
+        self.remember_labels = tk.BooleanVar(value=True)
+        ttk.Checkbutton(mid, text='Kaydederken başlıkları hatırla',
+                        variable=self.remember_labels).pack(anchor='w', pady=(4, 0))
 
         ttk.Label(right, text='Yüksek riskli sayfalar', font=('Segoe UI', 10, 'bold')).pack(anchor='w')
         ttk.Label(right, text='Bir satıra tıklayın, sayfa ortada açılır. OCR eksikse gizlenecek '
@@ -350,6 +354,7 @@ class Application(tk.Tk):
         self.cache_exe = None
         self.cache_source_stamp = None
         self.findings = []
+        self.label_hits.clear()
         self.filters_stale = False
         self.warnings = []
         self.omit_pages.clear()
@@ -476,7 +481,8 @@ class Application(tk.Tk):
             return
         for finding in self.findings:
             if finding.page == self.page_no and finding.selected and not self.filters_stale:
-                self._draw_pdf_rect(finding.rect, '#eab308', 2)
+                color = '#7c3aed' if finding.line_prefix else '#eab308'
+                self._draw_pdf_rect(finding.rect, color, 2)
         for rect in self.manual.get(self.page_no, ()):
             self._draw_pdf_rect(rect, '#dc2626', 3)
 
@@ -590,11 +596,14 @@ class Application(tk.Tk):
                 if (after.st_size, after.st_mtime_ns) != source_stamp:
                     raise RuntimeError('Kaynak PDF işlem sırasında değişti. Dosyayı yeniden açıp tarayın.')
                 working_path = str(working.path) if working else path
+                label_hits = {}
                 found, warnings = scan_pdf(working_path, terms, self._progress,
-                    use_ocr=engine == 'Tesseract', filter_data=filter_data, external_ocr=engine == 'FineReader')
+                    use_ocr=engine == 'Tesseract', filter_data=filter_data, external_ocr=engine == 'FineReader',
+                    label_hits=label_hits)
                 if self.cancel_event.is_set():
                     raise OcrCancelled('İşlem iptal edildi.')
-                self.events.put(('scan_done', found, warnings, working_path, converted, exe, engine, source_stamp))
+                self.events.put(('scan_done', found, warnings, working_path, converted, exe, engine,
+                                 source_stamp, label_hits))
             except OcrCancelled as exc:
                 if converted:
                     converted.cleanup()
@@ -622,11 +631,13 @@ class Application(tk.Tk):
 
         def run():
             try:
+                label_hits = {}
                 findings, warnings = scan_pdf(path, terms, self._progress, use_ocr=True,
-                                              filter_data=filter_data, page_numbers=pages, retry_ocr=True)
+                                              filter_data=filter_data, page_numbers=pages, retry_ocr=True,
+                                              label_hits=label_hits)
                 if self.cancel_event.is_set():
                     raise OcrCancelled('İşlem iptal edildi.')
-                self.events.put(('retry_done', pages, findings, warnings))
+                self.events.put(('retry_done', pages, findings, warnings, label_hits))
             except OcrCancelled as exc:
                 self.events.put(('cancelled', str(exc)))
             except Exception as exc:
@@ -645,7 +656,7 @@ class Application(tk.Tk):
                     self.status.set(f'{msg}: {n} / {total}')
                 elif kind == 'scan_done':
                     self.filters_stale = False
-                    found, warnings, working_path, converted, exe, engine, source_stamp = data
+                    found, warnings, working_path, converted, exe, engine, source_stamp, label_hits = data
                     same_pdf = self.path == working_path and self.source_stamp == source_stamp
                     if not same_pdf:
                         self.manual.clear()
@@ -664,6 +675,7 @@ class Application(tk.Tk):
                     self.page_no = min(self.page_no, self.page_count - 1)
                     self.page_text.set(f'Sayfa {self.page_no + 1} / {self.page_count}')
                     self.findings, self.warnings = found, warnings
+                    self.label_hits = label_hits
                     self._update_lists(preserve_approvals=same_pdf)
                     self.set_busy(False)
                     self.status.set(f'{engine} taraması tamamlandı. {len(self.findings)} bulgu, '
@@ -672,7 +684,8 @@ class Application(tk.Tk):
                         self.fr_info.set('FineReader: OCR çıktısı otomatik alındı ve filtrelendi')
                     self.show_page()
                 elif kind == 'retry_done':
-                    pages, found, warnings = data
+                    pages, found, warnings, label_hits = data
+                    self.label_hits.update(label_hits)
                     self._merge_retry_results(pages, found, warnings)
                     self.set_busy(False)
                     self.status.set(f'{len(pages)} sayfa yeniden tarandı. '
@@ -688,12 +701,22 @@ class Application(tk.Tk):
                     self.set_busy(False)
                     self.status.set(data[0])
                 elif kind == 'export_done':
-                    path, page_count = data
+                    path, page_count, labels = data
+                    note = ''
+                    learn_error = False
+                    try:
+                        learned = self.filter_store.remember_line_labels(labels)
+                        if learned:
+                            note = f' {len(learned)} yeni başlık hatırlandı.'
+                    except (OSError, ValueError) as exc:
+                        learn_error = True
+                        note = f' Başlık hafızası kaydedilemedi. {exc}'
                     self.set_busy(False)
-                    self.status.set(f'Temiz PDF oluşturuldu ({page_count} sayfa). {path}')
+                    self.status.set(f'Temiz PDF oluşturuldu ({page_count} sayfa).{note} {path}')
                     if not self.closing:
-                        messagebox.showinfo('İşlem tamamlandı',
-                                            f'{page_count} sayfalık PDF kaydedildi. Paylaşmadan önce gözden geçirin.\n\n{path}')
+                        notify = messagebox.showwarning if learn_error else messagebox.showinfo
+                        notify('İşlem tamamlandı', f'{page_count} sayfalık PDF kaydedildi.{note}\n'
+                               f'Paylaşmadan önce gözden geçirin.\n\n{path}')
                 elif kind == 'error':
                     self.set_busy(False)
                     self.status.set('HATA: ' + data[0])
@@ -872,6 +895,22 @@ class Application(tk.Tk):
         else:
             self._set_risks_approved({n}, False)
 
+    def _labels_from_manual_marks(self, manual):
+        labels = []
+        with fitz.open(self.path) as doc:
+            for page, rects in manual.items():
+                hits = self.label_hits.get(page)
+                if hits is None:
+                    words = doc[page].get_text('words', sort=True)
+                    hits = line_label_hits(extract_lines_from_words(words))
+                marks = [fitz.Rect(rect) for rect in rects]
+                for label, boxes in hits:
+                    words = [fitz.Rect(box) for box in boxes]
+                    if any((word & mark).get_area() >= .30 * min(word.get_area(), mark.get_area())
+                           for word in words if not word.is_empty for mark in marks):
+                        labels.append(label)
+        return new_line_labels(self.filter_store.data, labels)
+
     def start_export(self):
         if self.busy or not self.path:
             return
@@ -893,10 +932,22 @@ class Application(tk.Tk):
             return
         manual_count = sum(len(rects) for rects in manual.values())
         omitted_count = len(self.omit_pages)
+        labels = []
+        learning_note = ''
+        if manual and self.remember_labels.get() and not self.filter_store.error:
+            try:
+                labels = self._labels_from_manual_marks(manual)
+                if labels:
+                    names = ', '.join(label + ':' for label in labels[:12])
+                    if len(labels) > 12:
+                        names += f' ve {len(labels) - 12} başlık daha'
+                    learning_note = f'\nHatırlanacak başlıklar\n{names}\n'
+            except (OSError, ValueError, RuntimeError):
+                learning_note = '\nİşaretli alanlardaki başlıklar okunamadı.\n'
         if not messagebox.askyesno('Son kontrol',
                 f'Çıktıya {self.page_count - omitted_count} / {self.page_count} sayfa dahil edilecek.\n'
                 f'{len(self.approved_pages)} riskli sayfa onaylı. {omitted_count} sayfa dışlanacak.\n'
-                f'{len(findings)} otomatik bulgu ve {manual_count} elle işaretlenen alan karartılacak.\n'
+                f'{len(findings)} otomatik bulgu ve {manual_count} elle işaretlenen alan karartılacak.\n{learning_note}'
                 '\nYeni PDF kaydedilsin mi?'):
             return
         self.set_busy(True)
@@ -909,7 +960,7 @@ class Application(tk.Tk):
                     raise RuntimeError('Kaynak PDF değişti. Dosyayı yeniden açıp karartma alanlarını kontrol edin.')
                 path = export_pdf(source, output, findings, manual, omitted)
                 with fitz.open(path) as saved:
-                    self.events.put(('export_done', path, len(saved)))
+                    self.events.put(('export_done', path, len(saved), labels))
             except Exception as exc:
                 self.events.put(('error', type(exc).__name__ + ': ' + str(exc)))
         threading.Thread(target=run, daemon=True).start()

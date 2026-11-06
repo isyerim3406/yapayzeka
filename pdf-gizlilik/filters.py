@@ -10,6 +10,11 @@ import tempfile
 import unicodedata
 
 
+LINE_PREFIX = 'line_prefix'
+LEARNED_CATEGORY = 'Öğrenilen başlık'
+LABEL_START = re.compile(r'^([^:：]{1,55})[:：]')
+
+
 def normalize(text):
     text = unicodedata.normalize('NFKD', text.translate(str.maketrans('ıİ', 'ii'))).lower()
     return ''.join(c for c in text if c.isalnum())
@@ -45,6 +50,9 @@ def validate(data):
                 raise ValueError('Başlık/ifade listesi geçersiz.')
             if r['kind'] != 'regex' and not r['aliases']:
                 raise ValueError('En az bir başlık veya ifade girin.')
+            if r.get('scope') == LINE_PREFIX:
+                if r['kind'] != 'field' or not all(_label_prefix(alias.rstrip(':：') + ':') for alias in r['aliases']):
+                    raise ValueError('Satır başı filtresi için kısa bir başlık girin. Örnek Referans:')
             if type(r.get('max_lines')) is not int or not 1 <= r['max_lines'] <= 10:
                 raise ValueError('Satır sayısı 1–10 olmalı.')
             if r['kind'] == 'regex':
@@ -53,6 +61,26 @@ def validate(data):
                     raise ValueError('Kullanıcı filtresi başlık veya birebir ifade olmalı.')
                 re.compile(r['pattern'])
     return data
+
+
+def next_user_rule_id(data):
+    known = {rule['id'] for rule in data['rules'] + data['user_rules']}
+    index = 1
+    while f'U{index}' in known:
+        index += 1
+    return f'U{index}'
+
+
+def new_line_labels(data, labels):
+    known = {normalize(alias) for rule in data['rules'] + data['user_rules']
+             if rule.get('scope') == LINE_PREFIX for alias in rule['aliases']}
+    new = []
+    for label in labels:
+        key = normalize(label)
+        if key and key not in known:
+            new.append(label)
+            known.add(key)
+    return new
 
 
 class FilterStore:
@@ -84,6 +112,23 @@ class FilterStore:
         self.data = copy.deepcopy(data)
         self.error = None
 
+    def remember_line_labels(self, labels):
+        if not labels:
+            return []
+        # Merge with edits saved by another window since the document was opened.
+        data = validate(json.loads(self.path.read_text(encoding='utf-8'))) if self.path.exists() else self.snapshot()
+        new = new_line_labels(data, labels)
+        for label in new:
+            data['user_rules'].append(dict(
+                id=next_user_rule_id(data), name=label + ':', category=LEARNED_CATEGORY,
+                kind='field', scope=LINE_PREFIX, enabled=True, aliases=[label],
+                max_lines=1, multiline=False, review_required=True))
+        if new:
+            self.save(data)
+        else:
+            self.data = data
+        return new
+
 
 def _rows(lines):
     """Combine OCR blocks by geometric baseline; retain each word rectangle."""
@@ -113,14 +158,62 @@ def _box(ws):
     return (min(w[1][0] for w in ws), min(w[1][1] for w in ws), max(w[1][2] for w in ws), max(w[1][3] for w in ws))
 
 
+def _label_prefix(text):
+    match = LABEL_START.match(text)
+    if match is None or text[match.end():].startswith('//'):
+        return None
+    label = unicodedata.normalize('NFC', match[1].strip())
+    if not label or not label[0].isalpha() or len(normalize(label)) < 2:
+        return None
+    if len(label.split()) <= 6 and not re.search(r'\d{3}', label) and all(c.isalnum() or c in ' /-().&' for c in label):
+        return label
+    return None
+
+
+def _labelled_rows(rows):
+    """Recognize short colon labels at the start of a line or a separate column."""
+    for row in rows:
+        words = row['words']
+        starts = []
+        column_gap = max(10, row['h'] * .8)
+        for index, (_, rect) in enumerate(words):
+            if index and rect[0] - words[index - 1][1][2] < column_gap:
+                continue
+            prefix = []
+            for j in range(index, min(len(words), index + 8)):
+                value, box = words[j]
+                if j > index and box[0] - words[j - 1][1][2] >= column_gap and not value.startswith((':', '：')):
+                    break
+                prefix.append(value)
+                if ':' in value or '：' in value:
+                    break
+            label = _label_prefix(' '.join(prefix))
+            if label:
+                starts.append((index, label))
+        for i, (start, label) in enumerate(starts):
+            end = starts[i + 1][0] if i + 1 < len(starts) else len(words)
+            yield label, words[start:end]
+
+
+def line_label_hits(lines):
+    """Retain only heading text and word coordinates for later manual learning."""
+    return [(label, tuple(rect for _, rect in words))
+            for label, words in _labelled_rows(_rows(lines))]
+
+
 class FilterMatcher:
     def __init__(self, data):
         validate(data)
         # Disabled labels remain boundaries, so a preceding field cannot eat them.
         self.fields=[]
         self.text_rules=[]
+        self.line_rules={}
         for r in data['rules']+data['user_rules']:
-            if r['kind']=='field':
+            if r['kind']=='field' and r.get('scope')==LINE_PREFIX:
+                if r['enabled']:
+                    for alias in r['aliases']:
+                        self.line_rules.setdefault(normalize(alias), r)
+            elif r['kind']=='field':
                 for alias in r['aliases']:
                     self.fields.append((normalize(alias),r))
             elif r['enabled']:
@@ -128,9 +221,18 @@ class FilterMatcher:
                 self.text_rules.append((r,pats))
         self.fields.sort(key=lambda x:len(x[0]),reverse=True)
 
-    def find(self, lines, page, source):
+    def find(self, lines, page, source, label_hits=None):
         from engine import Finding, _tckn, _is_candidate
         rows=_rows(lines); output=[]; anchors=[]
+        if self.line_rules or label_hits is not None:
+            for label, words in _labelled_rows(rows):
+                if label_hits is not None:
+                    label_hits.append((label, tuple(rect for _, rect in words)))
+                rule = self.line_rules.get(normalize(label))
+                if rule:
+                    value = ' '.join(word for word, _ in words)
+                    output.append(Finding(page, _box(words), rule['category'], value,
+                                          source + ' / ' + rule['name'], line_prefix=True))
         for ri,row in enumerate(rows):
             ws=row['words']; used=set()
             for start in range(len(ws)):

@@ -2,7 +2,7 @@
 import copy
 import tkinter as tk
 from tkinter import ttk, messagebox
-from filters import normalize, validate
+from filters import LINE_PREFIX, next_user_rule_id, normalize, validate
 
 
 class FilterDialog(tk.Toplevel):
@@ -18,7 +18,8 @@ class FilterDialog(tk.Toplevel):
         self.multiline=tk.BooleanVar(value=False);self.lines=tk.IntVar(value=2)
         top=ttk.Frame(self,padding=12);top.pack(fill='x')
         ttk.Label(top,text='Kalıcı filtreler',font=('Segoe UI',15,'bold')).pack(anchor='w')
-        ttk.Label(top,text='Başlık filtresi karşısındaki değeri; ifade filtresi yazdığınız metni bulur. Kaydettikten sonra PDF’yi yeniden tarayın.').pack(anchor='w')
+        ttk.Label(top,text='Alan başlığı değeri, satır başı filtresi etiketle başlayan satırı, birebir ifade yazdığınız metni bulur.',
+                  wraplength=900).pack(anchor='w')
         body=ttk.Panedwindow(self,orient='horizontal');body.pack(fill='both',expand=True,padx=12)
         left=ttk.Frame(body);right=ttk.Frame(body,padding=(15,0,0,0));body.add(left,weight=1);body.add(right,weight=2)
         ttk.Entry(left,textvariable=self.search).pack(fill='x',pady=(0,8))
@@ -31,14 +32,17 @@ class FilterDialog(tk.Toplevel):
         for label,var in [('Filtre adı',self.name),('Kategori',self.category)]:
             ttk.Label(right,text=label).pack(anchor='w');ttk.Entry(right,textvariable=var).pack(fill='x',pady=(0,7))
         ttk.Label(right,text='Tür').pack(anchor='w')
-        self.typebox=ttk.Combobox(right,textvariable=self.kind,values=('Alan başlığı','Birebir ifade'),state='readonly')
+        self.typebox=ttk.Combobox(right,textvariable=self.kind,values=('Alan başlığı','Satır başı','Birebir ifade'),state='readonly')
         self.typebox.pack(fill='x',pady=(0,7))
+        self.typebox.bind('<<ComboboxSelected>>', self.update_line_options)
         ttk.Label(right,text='Başlıklar / ifadeler (her satıra bir tane)').pack(anchor='w')
         self.aliases=tk.Text(right,height=7,wrap='word');self.aliases.pack(fill='both',expand=True)
         ttk.Checkbutton(right,text='Etkin',variable=self.enabled).pack(anchor='w',pady=4)
-        ttk.Checkbutton(right,text='Alt satıra devam eden değeri de ara',variable=self.multiline).pack(anchor='w')
+        self.multiline_box=ttk.Checkbutton(right,text='Alt satıra devam eden değeri de ara',variable=self.multiline)
+        self.multiline_box.pack(anchor='w')
         row=ttk.Frame(right);row.pack(fill='x',pady=4);ttk.Label(row,text='En fazla satır:').pack(side='left')
-        ttk.Spinbox(row,from_=1,to=10,textvariable=self.lines,width=5).pack(side='left',padx=8)
+        self.line_count=ttk.Spinbox(row,from_=1,to=10,textvariable=self.lines,width=5)
+        self.line_count.pack(side='left',padx=8)
         ttk.Label(right,text='Örnek: Vergi No, VKN, Vergi Kimlik Numarası başlıklarını ayrı satırlara yazın.\nGörsel kaşe, imza ve filigranlar ayrıca kontrol edilmelidir.',wraplength=480).pack(anchor='w',pady=6)
         self.info=tk.StringVar(value='Değişiklikler Kaydet düğmesiyle kalıcı olur.')
         ttk.Label(self,textvariable=self.info,wraplength=900).pack(fill='x',padx=12,pady=6)
@@ -54,6 +58,11 @@ class FilterDialog(tk.Toplevel):
 
     def current(self):return next((r for r in self.rules() if r['id']==self.selected),None)
 
+    def update_line_options(self, _event=None):
+        state = 'disabled' if self.kind.get() == 'Satır başı' else 'normal'
+        self.multiline_box.configure(state=state)
+        self.line_count.configure(state=state)
+
     def refresh(self):
         self.tree.delete(*self.tree.get_children())
         q=normalize(self.search.get())
@@ -65,8 +74,14 @@ class FilterDialog(tk.Toplevel):
         r=copy.deepcopy(self.current()) or dict(id='',review_required=True,stop_at_next_label=True,notes='Kullanıcı filtresi',pattern='')
         r.update(name=self.name.get().strip(),category=self.category.get().strip(),enabled=self.enabled.get())
         if r.get('kind')!='regex':
-            r.update(kind='field' if self.kind.get()=='Alan başlığı' else 'literal',aliases=[a.strip() for a in self.aliases.get('1.0','end').splitlines() if a.strip()],multiline=self.multiline.get(),max_lines=int(self.lines.get()))
-            r['scope']='same_cell_or_labeled_value' if r['kind']=='field' else 'matched_text'
+            aliases = [a.strip() for a in self.aliases.get('1.0','end').splitlines() if a.strip()]
+            if self.kind.get() == 'Satır başı':
+                r.update(kind='field', aliases=aliases, scope=LINE_PREFIX, multiline=False, max_lines=1)
+            else:
+                kind = 'field' if self.kind.get() == 'Alan başlığı' else 'literal'
+                scope = 'same_cell_or_labeled_value' if kind == 'field' else 'matched_text'
+                r.update(kind=kind, aliases=aliases, scope=scope,
+                         multiline=self.multiline.get(), max_lines=int(self.lines.get()))
         return r
 
     def changed(self):
@@ -80,9 +95,7 @@ class FilterDialog(tk.Toplevel):
         try:
             r=self.draft()
             if not r['id']:
-                i=1
-                while any(x['id']==f'U{i}' for x in self.rules()):i+=1
-                r['id']=f'U{i}'
+                r['id']=next_user_rule_id(self.data)
             trial=copy.deepcopy(self.data)
             group='rules' if any(x['id']==r['id'] for x in trial['rules']) else 'user_rules'
             trial[group]=[x for x in trial[group] if x['id']!=r['id']]+[r]
@@ -101,7 +114,9 @@ class FilterDialog(tk.Toplevel):
         r=next(x for x in self.rules() if x['id']==target)
         self.selected=target;self.name.set(r['name']);self.category.set(r['category']);self.enabled.set(r['enabled'])
         self.multiline.set(r.get('multiline',False));self.lines.set(r.get('max_lines',2))
-        self.kind.set({'field':'Alan başlığı','literal':'Birebir ifade','regex':'Hazır desen'}[r['kind']])
+        kind = 'Satır başı' if r.get('scope') == LINE_PREFIX else {'field':'Alan başlığı','literal':'Birebir ifade','regex':'Hazır desen'}[r['kind']]
+        self.kind.set(kind)
+        self.update_line_options()
         self.typebox.configure(state='disabled' if r['kind']=='regex' else 'readonly')
         self.aliases.configure(state='normal');self.aliases.delete('1.0','end');self.aliases.insert('1.0','\n'.join(r['aliases']))
         if r['kind']=='regex':self.aliases.configure(state='disabled')
@@ -111,6 +126,7 @@ class FilterDialog(tk.Toplevel):
         if not self.apply():return
         self.selected=None;self.name.set('');self.category.set('Kullanıcı');self.kind.set('Alan başlığı')
         self.enabled.set(True);self.multiline.set(False);self.lines.set(2)
+        self.update_line_options()
         self.typebox.configure(state='readonly');self.aliases.configure(state='normal');self.aliases.delete('1.0','end')
         self.loading=True;self.tree.selection_remove(*self.tree.selection());self.loading=False
 
