@@ -220,9 +220,15 @@ def scan_pdf(path: str | Path, custom_terms=(), progress=None, use_ocr=True, fil
                 else:
                     try:
                         ocr_lines = list(_ocr_lines(page, zoom=1.8 if large_page else 2.2))
-                        findings.extend(matcher.find(ocr_lines, n, 'OCR'))
+                        ocr_findings = matcher.find(ocr_lines, n, 'OCR')
                         for text, mapping in ocr_lines:
-                            findings.extend(find_in_line(text, mapping, n, 'OCR', custom_terms, use_legacy=False))
+                            ocr_findings.extend(find_in_line(text, mapping, n, 'OCR', custom_terms, use_legacy=False))
+                        # OCR sees the rendered orientation. Redaction rectangles use PDF coordinates.
+                        if page.rotation:
+                            derotation = page.derotation_matrix
+                            for finding in ocr_findings:
+                                finding.rect = tuple(fitz.Rect(finding.rect) * derotation)
+                        findings.extend(ocr_findings)
                     except Exception as exc:
                         warnings.append(PageWarning(n, f'OCR başarısız: {type(exc).__name__}'))
             # A site or map can identify the location even after numbers are removed.
@@ -283,11 +289,11 @@ def export_pdf(source, output, findings, manual_rects=None, omitted_pages=None):
                 doc.delete_page(i)
             else:
                 page = doc[i]
+                bounds = page.rect * page.derotation_matrix
                 for rect in by_page[i]:
-                    rr = fitz.Rect(rect) & page.rect
+                    rr = fitz.Rect(rect) & bounds
                     if not rr.is_empty and not rr.is_infinite:
-                        rr = fitz.Rect(max(page.rect.x0, rr.x0 - 1), max(page.rect.y0, rr.y0 - 1),
-                                       min(page.rect.x1, rr.x1 + 1), min(page.rect.y1, rr.y1 + 1))
+                        rr = fitz.Rect(rr.x0 - 1, rr.y0 - 1, rr.x1 + 1, rr.y1 + 1) & bounds
                         page.add_redact_annot(rr, fill=(0, 0, 0), cross_out=False)
                 page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS,
                                       graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_COVERED,

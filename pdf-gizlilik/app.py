@@ -21,7 +21,7 @@ from finereader import (OcrSettings, OcrCancelled, validate_executable,
 class Application(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('PDF Gizlilik | Çevrimdışı Anonimleştirme')
+        self.title('PDF Gizlilik v4 | Çevrimdışı Anonimleştirme')
         self.geometry('1320x830')
         self.minsize(1050, 650)
         self.configure(bg='#edf1f5')
@@ -46,6 +46,7 @@ class Application(tk.Tk):
         self.scale = 1
         self.offset_x = 0
         self.offset_y = 0
+        self.preview_bounds = None
         self.drag_start = None
         self.events = queue.Queue()
         self.filter_store = FilterStore()
@@ -137,7 +138,7 @@ class Application(tk.Tk):
         self.page_text = tk.StringVar(value='Sayfa - / -')
         ttk.Label(viewtop, textvariable=self.page_text, width=20, anchor='center').pack(side='left')
         ttk.Button(viewtop, text='▶', width=4, command=lambda: self.goto(self.page_no + 1)).pack(side='left')
-        ttk.Label(viewtop, text='Sayfada sürükle = elle karartma alanı').pack(side='right')
+        ttk.Label(viewtop, text='Elle karartmak için sayfada sürükle').pack(side='right')
         self.canvas = tk.Canvas(mid, bg='#cbd5e1', highlightthickness=0, cursor='crosshair')
         self.canvas.pack(fill='both', expand=True, pady=5)
         self.canvas.bind('<Configure>', lambda _: self.show_page())
@@ -176,10 +177,24 @@ class Application(tk.Tk):
             button.config(state='disabled' if busy else 'normal')
         self.engine_combo.config(state='disabled' if busy else 'readonly')
         self.cancel_button.config(state='normal' if busy and cancellable else 'disabled')
+        self._refresh_export_button()
+
+    def _export_selection(self):
+        findings = [f for f in self.findings
+                    if not self.filters_stale and f.selected and f.page not in self.omit_pages]
+        manual = {page: tuple(rects) for page, rects in self.manual.items()
+                  if rects and page not in self.omit_pages}
+        return findings, manual
+
+    def _refresh_export_button(self):
+        findings, manual = self._export_selection()
+        enabled = bool(self.path and not self.busy and (findings or manual))
+        self.export_button.config(state='normal' if enabled else 'disabled')
 
     def ocr_engine_changed(self, _event=None):
         self.filters_stale = True
-        self.export_button.config(state='disabled')
+        self._refresh_export_button()
+        self.show_page()
         try:
             self.ocr_settings.save(self.ocr_engine.get(), self.ocr_settings.data['finereader_exe'])
         except OSError as exc:
@@ -201,7 +216,8 @@ class Application(tk.Tk):
             return
         self.ocr_engine.set('FineReader')
         self.filters_stale = True
-        self.export_button.config(state='disabled')
+        self._refresh_export_button()
+        self.show_page()
         self.fr_info.set('FineReader: konum kayıtlı; Bağlantıyı Dene ile kontrol edin')
         self.status.set('FineReader konumu kaydedildi. Bağlantıyı Dene veya Tüm Sayfaları Tara düğmesini kullanın.')
 
@@ -221,7 +237,6 @@ class Application(tk.Tk):
             return
         self.cancel_event.clear()
         self.set_busy(True, cancellable=True)
-        self.export_button.config(state='disabled')
         self.status.set('FineReader bağlantısı görüntülü örnek bir sayfayla deneniyor...')
         def run():
             try:
@@ -253,7 +268,8 @@ class Application(tk.Tk):
 
     def filters_saved(self):
         self.filters_stale = True
-        self.export_button.config(state='disabled')
+        self._refresh_export_button()
+        self.show_page()
         self.status.set('Filtreler kaydedildi. Açık PDF için Tüm Sayfaları Tara düğmesine basın.')
 
     def open_file(self):
@@ -278,6 +294,7 @@ class Application(tk.Tk):
         self.cache_exe = None
         self.cache_source_stamp = None
         self.findings = []
+        self.filters_stale = False
         self.warnings = []
         self.omit_pages.clear()
         self.mandatory_omit.clear()
@@ -285,8 +302,8 @@ class Application(tk.Tk):
         self.manual.clear()
         self.tree.delete(*self.tree.get_children())
         self.risks.delete(*self.risks.get_children())
-        self.export_button.config(state='disabled')
-        self.status.set(f'{Path(filename).name} — {self.page_count} sayfa. Taramayı başlatın.')
+        self._refresh_export_button()
+        self.status.set(f'{Path(filename).name} — {self.page_count} sayfa. Bir alan çizin veya taramayı başlatın.')
         self.goto(0)
 
     def goto(self, n):
@@ -297,6 +314,8 @@ class Application(tk.Tk):
         self.show_page()
 
     def show_page(self):
+        self.drag_start = None
+        self.preview_bounds = None
         if not self.path or self.canvas.winfo_width() < 40:
             return
         try:
@@ -307,13 +326,17 @@ class Application(tk.Tk):
                 self.scale = min(1.7, w / p.rect.width, h / p.rect.height)
                 pix = p.get_pixmap(matrix=fitz.Matrix(self.scale, self.scale), alpha=False)
                 img = Image.frombytes('RGB', (pix.width, pix.height), pix.samples)
+                bounds = p.rect
+                self.preview_rotation = p.rotation_matrix
+                self.preview_derotation = p.derotation_matrix
             self.show_image = ImageTk.PhotoImage(img)
             self.offset_x = (self.canvas.winfo_width() - img.width) / 2
             self.offset_y = (self.canvas.winfo_height() - img.height) / 2
+            self.preview_bounds = bounds
             self.canvas.delete('all')
             self.canvas.create_image(self.offset_x, self.offset_y, image=self.show_image, anchor='nw')
             for f in self.findings:
-                if f.page == self.page_no and f.selected:
+                if f.page == self.page_no and f.selected and not self.filters_stale:
                     self._draw_pdf_rect(f.rect, '#eab308', 2)
             for rect in self.manual[self.page_no]:
                 self._draw_pdf_rect(rect, '#dc2626', 3)
@@ -324,7 +347,7 @@ class Application(tk.Tk):
             self.status.set('Önizleme hatası: ' + type(exc).__name__)
 
     def _draw_pdf_rect(self, rect, color, width):
-        x0, y0, x1, y1 = rect
+        x0, y0, x1, y1 = fitz.Rect(rect) * self.preview_rotation
         self.canvas.create_rectangle(self.offset_x + x0 * self.scale,
                                      self.offset_y + y0 * self.scale,
                                      self.offset_x + x1 * self.scale,
@@ -332,9 +355,12 @@ class Application(tk.Tk):
                                      outline=color, width=width)
 
     def _drag_start(self, event):
-        if self.path is None or self.busy:
+        if self.preview_bounds is None or self.busy:
             return
-        self.drag_start = (event.x, event.y)
+        point = fitz.Point((event.x - self.offset_x) / self.scale,
+                           (event.y - self.offset_y) / self.scale)
+        if point in self.preview_bounds:
+            self.drag_start = (event.x, event.y)
 
     def _drag_move(self, event):
         if not self.drag_start:
@@ -345,7 +371,7 @@ class Application(tk.Tk):
                                      width=2, dash=(4, 3), tags='dragbox')
 
     def _drag_end(self, event):
-        if not self.drag_start or not self.path:
+        if not self.drag_start or self.preview_bounds is None or self.busy:
             return
         a, b = self.drag_start
         self.drag_start = None
@@ -356,14 +382,26 @@ class Application(tk.Tk):
             (a, self.offset_x), (b, self.offset_y), (event.x, self.offset_x), (event.y, self.offset_y))]
         x0, x1 = sorted((xy[0], xy[2]))
         y0, y1 = sorted((xy[1], xy[3]))
-        self.manual[self.page_no].append((x0, y0, x1, y1))
+        displayed_rect = fitz.Rect(x0, y0, x1, y1) & self.preview_bounds
+        if displayed_rect.is_empty:
+            self.canvas.delete('dragbox')
+            return
+        self.manual[self.page_no].append(tuple(displayed_rect * self.preview_derotation))
+        self._refresh_export_button()
         self.show_page()
+        if self.page_no in self.omit_pages:
+            self.status.set('Alan işaretlendi. Bu sayfa şu anda çıktıdan dışlanıyor.')
+        else:
+            self.status.set(f'Sayfa {self.page_no + 1}: {len(self.manual[self.page_no])} elle karartma alanı. '
+                            'Kaydetmek için Temiz PDF Oluştur’a basın.')
 
     def clear_manual(self):
         if self.busy:
             return
         self.manual[self.page_no].clear()
+        self._refresh_export_button()
         self.show_page()
+        self.status.set('Bu sayfanın elle karartma işaretleri kaldırıldı.')
 
     def start_scan(self):
         if self.busy:
@@ -402,8 +440,7 @@ class Application(tk.Tk):
         self.cancel_event.clear()
         self.filters_stale = True
         self.set_busy(True, cancellable=True)
-        self.scan_button.config(state='disabled')
-        self.export_button.config(state='disabled')
+        self.show_page()
         self.progress['value'] = 0
         path = self.original_path
         def run():
@@ -442,7 +479,6 @@ class Application(tk.Tk):
                     self.progress['value'] = n
                     self.status.set(f'{msg}: {n} / {total}')
                 elif kind == 'scan_done':
-                    self.set_busy(False)
                     self.filters_stale = False
                     found, warnings, working_path, converted, exe, engine, source_stamp = data
                     if self.path != working_path:
@@ -460,8 +496,7 @@ class Application(tk.Tk):
                     self.page_text.set(f'Sayfa {self.page_no + 1} / {self.page_count}')
                     self.findings, self.warnings = found, warnings
                     self._update_lists()
-                    self.scan_button.config(state='normal')
-                    self.export_button.config(state='normal')
+                    self.set_busy(False)
                     self.status.set(f'{engine} taraması tamamlandı: {len(self.findings)} bulgu, {len(self.omit_pages)} riskli sayfa.')
                     if engine == 'FineReader':
                         self.fr_info.set('FineReader: OCR çıktısı otomatik alındı ve filtrelendi')
@@ -470,28 +505,19 @@ class Application(tk.Tk):
                     self.set_busy(False)
                     self.fr_info.set('FineReader: örnek OCR ve otomatik çıktı doğrulandı')
                     self.status.set(data[0])
-                    if self.findings and not self.filters_stale:
-                        self.export_button.config(state='normal')
                     if not self.closing:
                         messagebox.showinfo('Bağlantı başarılı', data[0])
                 elif kind == 'cancelled':
                     self.set_busy(False)
                     self.status.set(data[0])
-                    if self.findings and not self.filters_stale:
-                        self.export_button.config(state='normal')
                 elif kind == 'export_done':
                     self.set_busy(False)
-                    self.scan_button.config(state='normal')
-                    self.export_button.config(state='normal')
                     self.status.set('Temiz PDF oluşturuldu: ' + data[0])
                     if not self.closing:
                         messagebox.showinfo('İşlem tamamlandı',
                                             'PDF kaydedildi. Gemini’ye yüklemeden önce dosyayı görsel olarak inceleyin.\n\n' + data[0])
                 elif kind == 'error':
                     self.set_busy(False)
-                    self.scan_button.config(state='normal')
-                    if self.findings and not self.filters_stale:
-                        self.export_button.config(state='normal')
                     self.status.set('HATA: ' + data[0])
                     if not self.closing:
                         messagebox.showerror('İşlem başarısız', data[0])
@@ -554,6 +580,7 @@ class Application(tk.Tk):
         for f in findings:
             f.selected = new_value
         self.tree.set(item, 'state', '☑' if new_value else '☐')
+        self._refresh_export_button()
         self.show_page()
 
     def _select_group(self, _event):
@@ -587,20 +614,18 @@ class Application(tk.Tk):
             self.omit_pages.add(n)
             self.risks.set(row, 'state', f'{n + 1} · DIŞLA')
         self._risk_summary()
+        self._refresh_export_button()
         self.show_page()
 
     def start_export(self):
-        if self.busy or self.filters_stale:
-            return
-        if not self.path or not self.findings:
-            messagebox.showwarning('Bulgular yok', 'Önce tarama yapın ve en az bir bulguyu işaretleyin.')
-            return
-        selected = sum(f.selected for f in self.findings)
-        if not selected and not any(self.manual.values()):
-            messagebox.showwarning('Karartma yok', 'Hiçbir alan seçilmedi.')
+        if self.busy or not self.path:
             return
         if len(self.omit_pages) == self.page_count:
             messagebox.showwarning('Sayfa yok', 'Bütün sayfalar dışlanıyor; çıktı oluşturulamaz.')
+            return
+        findings, manual = self._export_selection()
+        if not findings and not manual:
+            messagebox.showwarning('Karartma alanı seçin', 'Sayfada bir alan çizin veya tarama listesinden bulgu seçin.')
             return
         output = filedialog.asksaveasfilename(
             title='Yeni anonim PDF', defaultextension='.pdf',
@@ -611,14 +636,13 @@ class Application(tk.Tk):
         if Path(output).exists():
             messagebox.showerror('Üzerine yazma engellendi', 'Çıktı zaten var. Yeni ad seçin.')
             return
+        manual_count = sum(len(rects) for rects in manual.values())
         if not messagebox.askyesno('Son kontrol',
-                f'{selected} işaretli eşleşme karartılacak, {len(self.omit_pages)} sayfa çıkarılacak.\n'
-                'Orijinal PDF korunacak; yedek oluşturulmayacak.\n\nDevam edilsin mi?'):
+                f'{len(findings)} otomatik bulgu ve {manual_count} elle işaretlenen alan karartılacak.\n'
+                f'{len(self.omit_pages)} sayfa çıkarılacak.\n\nYeni PDF kaydedilsin mi?'):
             return
-        self.export_button.config(state='disabled')
-        self.scan_button.config(state='disabled')
         self.set_busy(True)
-        source, findings, manual, omitted = self.path, list(self.findings), dict(self.manual), set(self.omit_pages)
+        source, omitted = self.path, set(self.omit_pages)
         def run():
             try:
                 path = export_pdf(source, output, findings, manual, omitted)
